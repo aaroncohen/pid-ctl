@@ -3,6 +3,8 @@
 use assert_cmd::Command;
 use pid_ctl::app::StateStore;
 use predicates::str::contains;
+
+use crate::helpers::assert_json_ts_iso8601_utc;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -217,8 +219,9 @@ fn loop_log_appends_ndjson() {
     assert!(!lines.is_empty(), "log file should have at least one line");
     // Each line should be valid JSON.
     for line in &lines {
-        serde_json::from_str::<serde_json::Value>(line)
+        let value: serde_json::Value = serde_json::from_str(line)
             .unwrap_or_else(|_| panic!("log line is not valid JSON: {line}"));
+        assert_json_ts_iso8601_utc(&value);
     }
 }
 

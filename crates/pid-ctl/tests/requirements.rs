@@ -8,6 +8,8 @@
 //!
 //! Tests should verify **CLI / persistence / IPC contracts** (exit codes, streams, files, JSON) — behavioral “social” tests, not private app internals.
 
+#[path = "req/helpers.rs"]
+mod helpers;
 #[path = "req/req_cv_write_policy.rs"]
 mod req_cv_write_policy;
 #[path = "req/req_flag_precedence.rs"]

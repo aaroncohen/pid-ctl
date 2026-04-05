@@ -172,6 +172,8 @@ pub struct TickOutcome {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct IterationRecord {
     pub schema_version: u64,
+    /// Wall-clock timestamp when the record was produced (ISO 8601 UTC, second precision).
+    pub ts: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub iter: u64,
@@ -200,6 +202,7 @@ impl IterationRecord {
     ) -> Self {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
             name,
             iter,
             pv,

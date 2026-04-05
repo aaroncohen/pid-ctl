@@ -4,6 +4,8 @@
 use assert_cmd::Command;
 use pid_ctl::app::StateStore;
 use predicates::str::{contains, starts_with};
+
+use crate::helpers::assert_json_ts_iso8601_utc;
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------------
@@ -54,6 +56,8 @@ fn once_format_json_with_cv_file() {
     // Must be parseable JSON
     let value: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("stdout should be valid JSON");
+
+    assert_json_ts_iso8601_utc(&value);
 
     assert!(
         (value["cv"].as_f64().expect("cv field present") - 5.0).abs() < 1e-9,
