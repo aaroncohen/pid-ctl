@@ -7,6 +7,7 @@ use pid_ctl_core::{ConfigError, PidConfig, PidController, StepInput, StepResult}
 use serde::Serialize;
 use std::error::Error;
 use std::fmt;
+use time::format_description::well_known::Rfc3339;
 
 pub use state_store::{
     STATE_SCHEMA_VERSION, StateLock, StateSnapshot, StateStore, StateStoreError,
@@ -114,6 +115,7 @@ impl ControllerSession {
                 &step,
                 self.controller.last_error().unwrap_or(0.0),
             ),
+            d_term_skipped: step.d_term_skipped,
             state_write_failed,
         })
     }
@@ -124,6 +126,16 @@ impl ControllerSession {
         self.controller.mark_dt_skipped();
         self.snapshot.updated_at = Some(now_iso8601());
         self.persist_snapshot().err()
+    }
+
+    /// Elapsed wall-clock seconds since `snapshot.updated_at` (RFC 3339 UTC), if present and parseable.
+    #[must_use]
+    pub fn wall_clock_dt_since_state_update(&self) -> Option<f64> {
+        let ts = self.snapshot.updated_at.as_ref()?;
+        let past = time::OffsetDateTime::parse(ts, &Rfc3339).ok()?;
+        let now = time::OffsetDateTime::now_utc();
+        let delta = now - past;
+        Some(delta.as_seconds_f64().max(0.0))
     }
 
     /// Records a CV value confirmed written to the actuator without advancing `iter`
@@ -181,6 +193,9 @@ impl ControllerSession {
 #[derive(Debug)]
 pub struct TickOutcome {
     pub record: IterationRecord,
+    /// Set when the D term was zeroed on this tick due to an unreliable
+    /// derivative condition (first tick, post-dt-skip, or post-reset).
+    pub d_term_skipped: Option<pid_ctl_core::DTermSkipReason>,
     pub state_write_failed: Option<StateStoreError>,
 }
 
@@ -383,4 +398,105 @@ fn resolve_controller_name(
     }
 
     String::from("pid-ctl")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ControllerSession, SessionConfig};
+    use crate::adapters::CvSink;
+    use pid_ctl_core::PidConfig;
+
+    struct OkSink;
+
+    impl CvSink for OkSink {
+        fn write_cv(&mut self, _cv: f64) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn post_dt_skip_zeros_d_on_next_tick() {
+        let cfg = PidConfig {
+            kd: 2.0,
+            ki: 0.0,
+            setpoint: 0.0,
+            ..PidConfig::default()
+        };
+
+        let session_cfg = SessionConfig {
+            name: None,
+            pid: cfg,
+            state_store: None,
+            reset_accumulator: false,
+        };
+
+        let mut session = ControllerSession::new(session_cfg).expect("session");
+        let mut sink = OkSink;
+
+        session.process_pv(1.0, 1.0, &mut sink).expect("tick1");
+        let r2 = session.process_pv(2.0, 1.0, &mut sink).expect("tick2");
+        assert!(
+            (r2.record.d - (-2.0)).abs() < 1e-9,
+            "expected D=-kd*delta_pv, got {}",
+            r2.record.d
+        );
+
+        session.on_dt_skipped();
+        let r3 = session.process_pv(3.0, 1.0, &mut sink).expect("tick3");
+        assert!(
+            r3.record.d.abs() < f64::EPSILON,
+            "D should be zero after dt skip"
+        );
+    }
+
+    #[test]
+    fn post_dt_skip_reason_surfaces_in_tick_outcome() {
+        use pid_ctl_core::DTermSkipReason;
+
+        let cfg = PidConfig {
+            kd: 1.0,
+            setpoint: 50.0,
+            ..PidConfig::default()
+        };
+
+        let session_cfg = SessionConfig {
+            name: None,
+            pid: cfg,
+            state_store: None,
+            reset_accumulator: false,
+        };
+
+        let mut session = ControllerSession::new(session_cfg).expect("session");
+        let mut sink = OkSink;
+
+        // First tick seeds last_pv.
+        let _ = session.process_pv(45.0, 1.0, &mut sink).expect("tick1");
+
+        session.on_dt_skipped();
+        let outcome = session.process_pv(46.0, 1.0, &mut sink).expect("tick2");
+        assert_eq!(outcome.d_term_skipped, Some(DTermSkipReason::PostDtSkip));
+    }
+
+    #[test]
+    fn no_d_term_skip_on_normal_tick() {
+        let cfg = PidConfig {
+            kd: 1.0,
+            setpoint: 50.0,
+            ..PidConfig::default()
+        };
+
+        let session_cfg = SessionConfig {
+            name: None,
+            pid: cfg,
+            state_store: None,
+            reset_accumulator: false,
+        };
+
+        let mut session = ControllerSession::new(session_cfg).expect("session");
+        let mut sink = OkSink;
+
+        let _ = session.process_pv(45.0, 1.0, &mut sink).expect("tick1");
+        let outcome = session.process_pv(46.0, 1.0, &mut sink).expect("tick2");
+        assert_eq!(outcome.d_term_skipped, None);
+    }
 }

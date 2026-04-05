@@ -1,11 +1,12 @@
 use pid_ctl::adapters::{CmdPvSource, CvSink, FileCvSink, FilePvSource, PvSource, StdoutCvSink};
 use pid_ctl::app::{self, ControllerSession, SessionConfig, StateSnapshot, StateStore};
+use pid_ctl::json_events;
 use pid_ctl::schedule::next_deadline_after_tick;
 use pid_ctl_core::{AntiWindupStrategy, PidConfig};
 use std::env;
 use std::fmt;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,17 +67,37 @@ fn run_once(args: &OnceArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
     let mut sink = build_cv_sink(&args.cv_sink, args.cv_precision);
+    let mut log_file = open_log_optional(args.log_path.as_deref())?;
+
+    let dt = resolve_once_dt(&session, args, &mut log_file);
 
     let raw_pv = resolve_pv(&args.pv_source, args.cmd_timeout)
         .map_err(|error| CliError::new(1, format!("failed to read PV: {error}")))?;
     let scaled_pv = raw_pv * args.scale;
-    match session.process_pv(scaled_pv, args.dt, sink.as_mut()) {
+    match session.process_pv(scaled_pv, dt, sink.as_mut()) {
         Ok(outcome) => {
+            if let Some(reason) = outcome.d_term_skipped {
+                json_events::emit_d_term_skipped(&mut log_file, reason, outcome.record.iter);
+            }
+
             if matches!(args.output_format, OutputFormat::Json) {
                 print_iteration_json(&outcome.record)?;
             }
 
+            if let Some(file) = log_file.as_mut()
+                && let Ok(json) = serde_json::to_string(&outcome.record)
+            {
+                let _ = writeln!(file, "{json}");
+            }
+
             if let Some(error) = outcome.state_write_failed {
+                if let Some(path) = &args.state_path {
+                    json_events::emit_state_write_failed(
+                        &mut log_file,
+                        path.clone(),
+                        error.to_string(),
+                    );
+                }
                 return Err(CliError::new(
                     4,
                     format!("state persistence failed after CV was emitted: {error}"),
@@ -85,7 +106,10 @@ fn run_once(args: &OnceArgs) -> Result<(), CliError> {
 
             Ok(())
         }
-        Err(error) => Err(CliError::new(5, error.to_string())),
+        Err(error) => {
+            json_events::emit_cv_write_failed(&mut log_file, error.to_string(), 1);
+            Err(CliError::new(5, error.to_string()))
+        }
     }
 }
 
@@ -95,6 +119,7 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
     let mut sink = StdoutCvSink {
         precision: args.cv_precision,
     };
+    let mut log_file = open_log_optional(args.log_path.as_deref())?;
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -109,8 +134,25 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
             .process_pv(pv, args.dt, &mut sink)
             .map_err(|error| CliError::new(1, error.to_string()))?;
 
+        if let Some(reason) = outcome.d_term_skipped {
+            json_events::emit_d_term_skipped(&mut log_file, reason, outcome.record.iter);
+        }
+
+        if let Some(file) = log_file.as_mut()
+            && let Ok(json) = serde_json::to_string(&outcome.record)
+        {
+            let _ = writeln!(file, "{json}");
+        }
+
         if let Some(error) = outcome.state_write_failed {
             eprintln!("state persistence failed: {error}");
+            if let Some(path) = &args.state_path {
+                json_events::emit_state_write_failed(
+                    &mut log_file,
+                    path.clone(),
+                    error.to_string(),
+                );
+            }
         }
     }
 
@@ -123,22 +165,7 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
     let mut pv_source = build_pv_source(&args.pv_source, args.cmd_timeout);
     let mut cv_sink = build_cv_sink(&args.cv_sink, args.cv_precision);
 
-    // Open optional NDJSON log file.
-    let mut log_file = if let Some(ref path) = args.log_path {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|error| {
-                CliError::new(
-                    1,
-                    format!("failed to open log file {}: {error}", path.display()),
-                )
-            })?;
-        Some(file)
-    } else {
-        None
-    };
+    let mut log_file = open_log_optional(args.log_path.as_deref())?;
 
     // Set up SIGTERM/SIGINT shutdown flag.
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -178,45 +205,50 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
         next_deadline = next_deadline_after_tick(tick_deadline, interval, now);
 
         // Measure dt — wall-clock elapsed since last PID step (actual time between ticks).
-        let dt = now.duration_since(last_tick).as_secs_f64();
+        let raw_dt = now.duration_since(last_tick).as_secs_f64();
         last_tick = now;
 
-        // Interval slip detection.
-        if dt > interval_secs * 1.5 {
+        // Interval slip (plan: Reliability §10 — tick longer than configured `--interval`).
+        if raw_dt > interval_secs {
             eprintln!(
                 "interval slip: tick took {:.0}ms (interval: {:.0}ms)",
-                dt * 1000.0,
+                raw_dt * 1000.0,
                 interval_secs * 1000.0
             );
+            let interval_ms = millis_round_u64(interval_secs * 1000.0);
+            let actual_ms = millis_round_u64(raw_dt * 1000.0);
+            json_events::emit_interval_slip(&mut log_file, interval_ms, actual_ms);
         }
 
-        // dt bounds check — skip tick if out of range.
-        if dt < args.min_dt {
-            eprintln!(
-                "dt {dt:.6}s below min_dt {:.6}s — skipping tick",
-                args.min_dt
-            );
-            if let Some(err) = session.on_dt_skipped() {
-                eprintln!("state write failed: {err}");
+        let dt = match apply_measured_dt(
+            raw_dt,
+            args.min_dt,
+            args.max_dt,
+            args.dt_clamp,
+            &mut log_file,
+        ) {
+            MeasuredDt::Skip => {
+                if let Some(err) = session.on_dt_skipped() {
+                    eprintln!("state write failed: {err}");
+                    if let Some(path) = &args.state_path {
+                        json_events::emit_state_write_failed(
+                            &mut log_file,
+                            path.clone(),
+                            err.to_string(),
+                        );
+                    }
+                }
+                continue;
             }
-            continue;
-        }
-        if dt > args.max_dt {
-            eprintln!(
-                "dt {dt:.6}s exceeds max_dt {:.6}s — skipping tick",
-                args.max_dt
-            );
-            if let Some(err) = session.on_dt_skipped() {
-                eprintln!("state write failed: {err}");
-            }
-            continue;
-        }
+            MeasuredDt::Use(dt) => dt,
+        };
 
         // Read PV.
         let raw_pv = match pv_source.read_pv() {
             Ok(pv) => pv,
             Err(error) => {
                 eprintln!("PV read failed: {error}");
+                json_events::emit_pv_read_failure(&mut log_file, error.to_string(), args.safe_cv);
                 write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
                 continue;
             }
@@ -254,6 +286,10 @@ fn run_loop_tick(
         Ok(outcome) => {
             *cv_fail_count = 0;
 
+            if let Some(reason) = outcome.d_term_skipped {
+                json_events::emit_d_term_skipped(log_file, reason, outcome.record.iter);
+            }
+
             if matches!(args.output_format, OutputFormat::Json)
                 && let Err(error) = print_iteration_json(&outcome.record)
             {
@@ -268,12 +304,16 @@ fn run_loop_tick(
 
             if let Some(error) = outcome.state_write_failed {
                 eprintln!("state write failed: {error}");
+                if let Some(path) = &args.state_path {
+                    json_events::emit_state_write_failed(log_file, path.clone(), error.to_string());
+                }
             }
         }
         Err(error) => {
             *cv_fail_count += 1;
             let limit = args.cv_fail_after;
             eprintln!("CV write failed ({cv_fail_count}/{limit}): {error}");
+            json_events::emit_cv_write_failed(log_file, error.to_string(), *cv_fail_count);
             if *cv_fail_count >= limit {
                 write_safe_cv(args.safe_cv, cv_sink, session);
                 return Err(CliError::new(
@@ -285,6 +325,117 @@ fn run_loop_tick(
     }
 
     Ok(())
+}
+
+enum MeasuredDt {
+    Skip,
+    Use(f64),
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn millis_round_u64(ms: f64) -> u64 {
+    let v = ms.round();
+    if !v.is_finite() || v <= 0.0 {
+        return 0;
+    }
+    if v >= u64::MAX as f64 {
+        return u64::MAX;
+    }
+    v as u64
+}
+
+fn open_log_optional(path: Option<&Path>) -> Result<Option<std::fs::File>, CliError> {
+    match path {
+        Some(p) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .map_err(|error| {
+                    CliError::new(
+                        1,
+                        format!("failed to open log file {}: {error}", p.display()),
+                    )
+                })?;
+            Ok(Some(file))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Applies `--min-dt` / `--max-dt` for measured `dt` in `loop`: skip (default) or clamp (`--dt-clamp`).
+fn apply_measured_dt(
+    raw_dt: f64,
+    min_dt: f64,
+    max_dt: f64,
+    dt_clamp: bool,
+    log: &mut Option<std::fs::File>,
+) -> MeasuredDt {
+    if raw_dt >= min_dt && raw_dt <= max_dt {
+        return MeasuredDt::Use(raw_dt);
+    }
+
+    if dt_clamp {
+        let clamped = raw_dt.clamp(min_dt, max_dt);
+        if raw_dt < min_dt {
+            eprintln!("dt {raw_dt:.6}s below min_dt {min_dt:.6}s — clamping to min_dt");
+        } else {
+            eprintln!("dt {raw_dt:.6}s exceeds max_dt {max_dt:.6}s — clamping to max_dt");
+        }
+        json_events::emit_dt_clamped(log, raw_dt, clamped);
+        MeasuredDt::Use(clamped)
+    } else {
+        if raw_dt < min_dt {
+            eprintln!("dt {raw_dt:.6}s below min_dt {min_dt:.6}s — skipping tick");
+        } else {
+            eprintln!("dt {raw_dt:.6}s exceeds max_dt {max_dt:.6}s — skipping tick");
+        }
+        json_events::emit_dt_skipped(log, raw_dt, min_dt, max_dt);
+        MeasuredDt::Skip
+    }
+}
+
+fn resolve_once_dt(
+    session: &ControllerSession,
+    args: &OnceArgs,
+    log: &mut Option<std::fs::File>,
+) -> f64 {
+    if args.dt_explicit {
+        return args.dt;
+    }
+    if args.state_path.is_none() {
+        return args.dt;
+    }
+    match session.wall_clock_dt_since_state_update() {
+        Some(raw) => clamp_once_wall_clock_dt(raw, args.min_dt, args.max_dt, log),
+        None => args.dt,
+    }
+}
+
+fn clamp_once_wall_clock_dt(
+    raw: f64,
+    min_dt: f64,
+    max_dt: f64,
+    log: &mut Option<std::fs::File>,
+) -> f64 {
+    let raw = raw.max(0.0);
+    if raw < min_dt {
+        eprintln!("once: wall-clock dt {raw:.6}s below --min-dt {min_dt:.6}s — clamping to min_dt");
+        json_events::emit_dt_clamped(log, raw, min_dt);
+        return min_dt;
+    }
+    if raw > max_dt {
+        eprintln!(
+            "once: wall-clock dt {raw:.6}s exceeds --max-dt {max_dt:.6}s — clamping to max_dt"
+        );
+        json_events::emit_dt_clamped(log, raw, max_dt);
+        return max_dt;
+    }
+    raw
 }
 
 /// Writes the safe CV when configured; on success, records it as the last confirmed-applied CV.
@@ -343,6 +494,7 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         cv_fail_after: common.cv_fail_after.unwrap_or(10),
         min_dt: common.min_dt.unwrap_or(0.01),
         max_dt: common.max_dt.unwrap_or(max_dt_default),
+        dt_clamp: common.dt_clamp,
         log_path: common.log_path,
     })
 }
@@ -535,6 +687,9 @@ fn parse_once(args: &[String]) -> Result<OnceArgs, CliError> {
         pv_source,
         cmd_timeout: common.cmd_timeout.unwrap_or(Duration::from_secs(5)),
         dt: common.dt,
+        dt_explicit: common.dt_explicit,
+        min_dt: common.min_dt.unwrap_or(0.01),
+        max_dt: common.max_dt.unwrap_or(60.0),
         output_format: common.output_format,
         cv_sink,
         pid_config,
@@ -543,6 +698,7 @@ fn parse_once(args: &[String]) -> Result<OnceArgs, CliError> {
         reset_accumulator: common.reset_accumulator,
         scale: common.scale.unwrap_or(1.0),
         cv_precision: common.cv_precision.unwrap_or(2) as usize,
+        log_path: common.log_path,
     })
 }
 
@@ -565,6 +721,7 @@ fn parse_pipe(args: &[String]) -> Result<PipeArgs, CliError> {
         reset_accumulator: common.reset_accumulator,
         scale: common.scale.unwrap_or(1.0),
         cv_precision: common.cv_precision.unwrap_or(2) as usize,
+        log_path: common.log_path,
     })
 }
 
@@ -645,6 +802,8 @@ fn parse_common_args(args: &[String], command_kind: CommandKind) -> Result<Commo
     let mut parsed = CommonArgs {
         output_format: OutputFormat::Text,
         dt: 1.0,
+        dt_explicit: false,
+        dt_clamp: false,
         ..CommonArgs::default()
     };
 
@@ -766,6 +925,10 @@ fn handle_common_option(
     match flag {
         "--dt" => {
             parsed.dt = parse_f64_flag("--dt", args, index)?;
+            parsed.dt_explicit = true;
+        }
+        "--dt-clamp" => {
+            parsed.dt_clamp = true;
         }
         "--format" => {
             parsed.output_format = parse_output_format(args, index)?;
@@ -1013,6 +1176,10 @@ struct CommonArgs {
     pid_flags: PidFlags,
     output_format: OutputFormat,
     dt: f64,
+    /// True when `--dt` was passed (fixed dt; bypasses wall-clock / bounds where documented).
+    dt_explicit: bool,
+    /// Clamp measured dt to `[min_dt, max_dt]` instead of skipping (`loop` / `pipe`; `once` auto-dt always clamps).
+    dt_clamp: bool,
     cv_sink: Option<CvSinkConfig>,
     state_path: Option<PathBuf>,
     name: Option<String>,
@@ -1033,6 +1200,9 @@ struct OnceArgs {
     pv_source: PvSourceConfig,
     cmd_timeout: Duration,
     dt: f64,
+    dt_explicit: bool,
+    min_dt: f64,
+    max_dt: f64,
     output_format: OutputFormat,
     cv_sink: CvSinkConfig,
     pid_config: PidConfig,
@@ -1041,6 +1211,7 @@ struct OnceArgs {
     reset_accumulator: bool,
     scale: f64,
     cv_precision: usize,
+    log_path: Option<PathBuf>,
 }
 
 /// Which PV source was specified on the CLI.
@@ -1071,6 +1242,7 @@ struct PipeArgs {
     reset_accumulator: bool,
     scale: f64,
     cv_precision: usize,
+    log_path: Option<PathBuf>,
 }
 
 impl PipeArgs {
@@ -1101,6 +1273,7 @@ struct LoopArgs {
     cv_fail_after: u32,
     min_dt: f64,
     max_dt: f64,
+    dt_clamp: bool,
     log_path: Option<PathBuf>,
 }
 

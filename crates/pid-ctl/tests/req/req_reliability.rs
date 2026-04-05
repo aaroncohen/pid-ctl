@@ -198,3 +198,84 @@ fn loop_pv_failure_safe_cv_updates_last_cv_in_state() {
     assert_eq!(snapshot.last_cv, Some(12.34));
     assert_eq!(snapshot.iter, 2, "PV failure path must not advance iter");
 }
+
+/// Plan reliability §1: `once` emits a `cv_write_failed` JSON event to `--log` when CV write
+/// fails (exit 5). Nothing fails quietly.
+#[test]
+fn once_cv_write_failure_emits_cv_write_failed_json_event() {
+    use crate::helpers::assert_json_ts_iso8601_utc;
+
+    let dir = tempdir().expect("temporary directory");
+    let log_path = dir.path().join("events.ndjson");
+    let bad_cv = dir.path().join("missing").join("cv.txt");
+
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv",
+        "60.0",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "2.0",
+        "--cv-file",
+    ]);
+    cmd.arg(&bad_cv);
+    cmd.arg("--log");
+    cmd.arg(&log_path);
+
+    cmd.assert().code(5);
+
+    let log_contents = std::fs::read_to_string(&log_path).expect("read log file");
+    let event_line = log_contents
+        .lines()
+        .find(|line| line.contains("\"cv_write_failed\""))
+        .expect("expected a cv_write_failed JSON event line in log");
+
+    let event: serde_json::Value =
+        serde_json::from_str(event_line).expect("cv_write_failed line is valid JSON");
+
+    assert_eq!(event["event"].as_str(), Some("cv_write_failed"));
+    assert_eq!(event["consecutive_failures"].as_u64(), Some(1));
+    assert_json_ts_iso8601_utc(&event);
+}
+
+/// Plan D-on-measurement: when `--kd > 0` and there is no prior PV (first tick),
+/// a `d_term_skipped` structured event is emitted to `--log` with `reason:"no_pv_prev"`.
+#[test]
+fn d_term_skipped_no_pv_prev_emitted_to_log_on_first_tick() {
+    let dir = tempdir().expect("temporary directory");
+    let log_path = dir.path().join("events.ndjson");
+    let cv_path = dir.path().join("cv.txt");
+
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv",
+        "50.0",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--kd",
+        "0.5",
+        "--cv-file",
+    ]);
+    cmd.arg(&cv_path);
+    cmd.arg("--log");
+    cmd.arg(&log_path);
+
+    cmd.assert().success();
+
+    let log_content = std::fs::read_to_string(&log_path).expect("log file should exist");
+    let event: serde_json::Value = log_content
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|v| v.get("event").and_then(|e| e.as_str()) == Some("d_term_skipped"))
+        .expect("d_term_skipped event not found in log");
+
+    assert_eq!(event["reason"].as_str(), Some("no_pv_prev"));
+    assert_eq!(event["event"].as_str(), Some("d_term_skipped"));
+    assert!(event.get("ts").and_then(|v| v.as_str()).is_some());
+    assert_eq!(event["schema_version"].as_u64(), Some(1));
+}

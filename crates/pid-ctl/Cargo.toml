@@ -12,6 +12,7 @@ serde_json.workspace = true
 fs2.workspace = true
 ctrlc.workspace = true
 wait-timeout.workspace = true
+time.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

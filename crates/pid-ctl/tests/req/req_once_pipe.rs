@@ -214,3 +214,48 @@ fn pipe_with_scale() {
 
     cmd.assert().success().stdout(starts_with("5.00"));
 }
+
+/// `pipe --log <path>` appends one NDJSON iteration record per PV line to the log file.
+#[test]
+fn pipe_log_writes_iteration_records() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let log_path = dir.path().join("pipe.ndjson");
+
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args(["pipe", "--setpoint", "55.0", "--kp", "1.0", "--log"]);
+    cmd.arg(&log_path);
+    cmd.write_stdin("50.0\n51.0\n52.0\n");
+
+    cmd.assert().success();
+
+    let content = std::fs::read_to_string(&log_path).expect("read log file");
+    let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+
+    assert_eq!(
+        lines.len(),
+        3,
+        "expected 3 log lines (one per PV), got {}",
+        lines.len()
+    );
+
+    for line in &lines {
+        let value: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|_| panic!("log line is not valid JSON: {line}"));
+
+        assert_json_ts_iso8601_utc(&value);
+        assert!(
+            value.get("schema_version").is_some(),
+            "missing schema_version"
+        );
+        assert!(value.get("iter").is_some(), "missing iter");
+        assert!(value.get("pv").is_some(), "missing pv");
+        assert!(value.get("cv").is_some(), "missing cv");
+    }
+
+    // Verify iter increments: 1, 2, 3
+    for (i, line) in lines.iter().enumerate() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+        let iter = value["iter"].as_u64().expect("iter is a number");
+        assert_eq!(iter, (i + 1) as u64);
+    }
+}

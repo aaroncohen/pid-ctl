@@ -1,0 +1,227 @@
+//! Structured NDJSON event lines (stderr + optional `--log` file).
+
+use crate::app::{STATE_SCHEMA_VERSION, now_iso8601};
+use serde::Serialize;
+use std::io::Write;
+use std::path::PathBuf;
+
+fn emit_line(log: &mut Option<std::fs::File>, record: &impl Serialize) {
+    let Ok(json) = serde_json::to_string(record) else {
+        return;
+    };
+    eprintln!("{json}");
+    if let Some(f) = log {
+        let _ = writeln!(f, "{json}");
+    }
+}
+
+#[derive(Serialize)]
+pub struct DtSkippedEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub raw_dt: f64,
+    pub min_dt: f64,
+    pub max_dt: f64,
+}
+
+impl DtSkippedEvent {
+    #[must_use]
+    pub fn new(raw_dt: f64, min_dt: f64, max_dt: f64) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "dt_skipped",
+            raw_dt,
+            min_dt,
+            max_dt,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct DtClampedEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub raw_dt: f64,
+    pub clamped_dt: f64,
+}
+
+impl DtClampedEvent {
+    #[must_use]
+    pub fn new(raw_dt: f64, clamped_dt: f64) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "dt_clamped",
+            raw_dt,
+            clamped_dt,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct IntervalSlipEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub interval_ms: u64,
+    pub actual_ms: u64,
+}
+
+impl IntervalSlipEvent {
+    #[must_use]
+    pub fn new(interval_ms: u64, actual_ms: u64) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "interval_slip",
+            interval_ms,
+            actual_ms,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct PvReadFailureEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safe_cv: Option<f64>,
+}
+
+impl PvReadFailureEvent {
+    #[must_use]
+    pub fn new(error: impl Into<String>, safe_cv: Option<f64>) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "pv_read_failure",
+            error: error.into(),
+            safe_cv,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct CvWriteFailedEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub error: String,
+    pub consecutive_failures: u32,
+}
+
+impl CvWriteFailedEvent {
+    #[must_use]
+    pub fn new(error: impl Into<String>, consecutive_failures: u32) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "cv_write_failed",
+            error: error.into(),
+            consecutive_failures,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct StateWriteFailedEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub path: PathBuf,
+    pub error: String,
+}
+
+impl StateWriteFailedEvent {
+    #[must_use]
+    pub fn new(path: PathBuf, error: impl Into<String>) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "state_write_failed",
+            path,
+            error: error.into(),
+        }
+    }
+}
+
+pub fn emit_dt_skipped(log: &mut Option<std::fs::File>, raw_dt: f64, min_dt: f64, max_dt: f64) {
+    emit_line(log, &DtSkippedEvent::new(raw_dt, min_dt, max_dt));
+}
+
+pub fn emit_dt_clamped(log: &mut Option<std::fs::File>, raw_dt: f64, clamped_dt: f64) {
+    emit_line(log, &DtClampedEvent::new(raw_dt, clamped_dt));
+}
+
+pub fn emit_interval_slip(log: &mut Option<std::fs::File>, interval_ms: u64, actual_ms: u64) {
+    emit_line(log, &IntervalSlipEvent::new(interval_ms, actual_ms));
+}
+
+pub fn emit_pv_read_failure(
+    log: &mut Option<std::fs::File>,
+    error: impl Into<String>,
+    safe_cv: Option<f64>,
+) {
+    emit_line(log, &PvReadFailureEvent::new(error, safe_cv));
+}
+
+pub fn emit_cv_write_failed(
+    log: &mut Option<std::fs::File>,
+    error: impl Into<String>,
+    consecutive_failures: u32,
+) {
+    emit_line(log, &CvWriteFailedEvent::new(error, consecutive_failures));
+}
+
+pub fn emit_state_write_failed(
+    log: &mut Option<std::fs::File>,
+    path: PathBuf,
+    error: impl Into<String>,
+) {
+    emit_line(log, &StateWriteFailedEvent::new(path, error));
+}
+
+#[derive(Serialize)]
+pub struct DTermSkippedEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub reason: &'static str,
+    pub iter: u64,
+}
+
+impl DTermSkippedEvent {
+    #[must_use]
+    pub fn new(reason: &'static str, iter: u64) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "d_term_skipped",
+            reason,
+            iter,
+        }
+    }
+}
+
+/// Converts a `DTermSkipReason` to its plan-specified string representation.
+#[must_use]
+pub fn reason_str(reason: pid_ctl_core::DTermSkipReason) -> &'static str {
+    match reason {
+        pid_ctl_core::DTermSkipReason::NoPvPrev => "no_pv_prev",
+        pid_ctl_core::DTermSkipReason::PostDtSkip => "post_dt_skip",
+        pid_ctl_core::DTermSkipReason::PostReset => "post_reset",
+    }
+}
+
+pub fn emit_d_term_skipped(
+    log: &mut Option<std::fs::File>,
+    reason: pid_ctl_core::DTermSkipReason,
+    iter: u64,
+) {
+    emit_line(log, &DTermSkippedEvent::new(reason_str(reason), iter));
+}
