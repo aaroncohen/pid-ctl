@@ -1,11 +1,12 @@
-use pid_ctl::adapters::{CvSink, FileCvSink, StdoutCvSink};
-use pid_ctl::app::{ControllerSession, SessionConfig, StateStore};
+use pid_ctl::adapters::{CmdPvSource, CvSink, FileCvSink, FilePvSource, PvSource, StdoutCvSink};
+use pid_ctl::app::{self, ControllerSession, SessionConfig, StateSnapshot, StateStore};
 use pid_ctl_core::{AntiWindupStrategy, PidConfig};
 use std::env;
 use std::fmt;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process;
+use std::time::Duration;
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -22,7 +23,9 @@ fn main() {
 
 fn run(args: &[String]) -> Result<(), CliError> {
     let Some((command, rest)) = args.split_first() else {
-        return Err(CliError::config("usage: pid-ctl <once|pipe> [OPTIONS]"));
+        return Err(CliError::config(
+            "usage: pid-ctl <once|pipe|status|purge|init> [OPTIONS]",
+        ));
     };
 
     match command.as_str() {
@@ -34,8 +37,20 @@ fn run(args: &[String]) -> Result<(), CliError> {
             let parsed = parse_pipe(rest)?;
             run_pipe(&parsed)
         }
+        "status" => {
+            let state_path = parse_state_flag(rest, "status")?;
+            run_status(&state_path)
+        }
+        "purge" => {
+            let state_path = parse_state_flag(rest, "purge")?;
+            run_purge(&state_path)
+        }
+        "init" => {
+            let state_path = parse_state_flag(rest, "init")?;
+            run_init(&state_path)
+        }
         other => Err(CliError::config(format!(
-            "unknown subcommand `{other}`; expected `once` or `pipe`"
+            "unknown subcommand `{other}`; expected `once`, `pipe`, `status`, `purge`, or `init`"
         ))),
     }
 }
@@ -45,7 +60,9 @@ fn run_once(args: &OnceArgs) -> Result<(), CliError> {
         .map_err(|error| CliError::config(error.to_string()))?;
     let mut sink = build_cv_sink(&args.cv_sink, args.cv_precision);
 
-    let scaled_pv = args.pv * args.scale;
+    let raw_pv = resolve_pv(&args.pv_source, args.cmd_timeout)
+        .map_err(|error| CliError::new(1, format!("failed to read PV: {error}")))?;
+    let scaled_pv = raw_pv * args.scale;
     match session.process_pv(scaled_pv, args.dt, sink.as_mut()) {
         Ok(outcome) => {
             if matches!(args.output_format, OutputFormat::Json) {
@@ -93,6 +110,120 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+fn run_status(state_path: &std::path::Path) -> Result<(), CliError> {
+    let store = StateStore::new(state_path);
+    let snapshot = store
+        .load()
+        .map_err(|error| CliError::new(1, error.to_string()))?
+        .ok_or_else(|| {
+            CliError::new(1, format!("{}: state file not found", state_path.display()))
+        })?;
+
+    let json = snapshot
+        .to_json_string()
+        .map_err(|error| CliError::new(1, error.to_string()))?;
+
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    writeln!(handle, "{json}")
+        .map_err(|error| CliError::new(1, format!("stdout write failed: {error}")))?;
+
+    Ok(())
+}
+
+fn run_purge(state_path: &std::path::Path) -> Result<(), CliError> {
+    let store = StateStore::new(state_path);
+    let _lock = store
+        .acquire_lock()
+        .map_err(|error| CliError::new(1, error.to_string()))?;
+
+    let snapshot = store
+        .load()
+        .map_err(|error| CliError::new(1, error.to_string()))?
+        .ok_or_else(|| {
+            CliError::new(1, format!("{}: state file not found", state_path.display()))
+        })?;
+
+    let purged = StateSnapshot {
+        schema_version: snapshot.schema_version,
+        name: snapshot.name,
+        kp: snapshot.kp,
+        ki: snapshot.ki,
+        kd: snapshot.kd,
+        setpoint: snapshot.setpoint,
+        out_min: snapshot.out_min,
+        out_max: snapshot.out_max,
+        created_at: snapshot.created_at,
+        updated_at: Some(app::now_iso8601()),
+        // Runtime fields cleared:
+        i_acc: 0.0,
+        last_pv: None,
+        last_error: None,
+        last_cv: None,
+        iter: 0,
+        effective_sp: None,
+        target_sp: None,
+    };
+
+    store
+        .save(&purged)
+        .map_err(|error| CliError::new(1, error.to_string()))?;
+
+    eprintln!("purged runtime state from {}", state_path.display());
+
+    Ok(())
+}
+
+fn run_init(state_path: &std::path::Path) -> Result<(), CliError> {
+    let store = StateStore::new(state_path);
+    let _lock = store
+        .acquire_lock()
+        .map_err(|error| CliError::new(1, error.to_string()))?;
+
+    if state_path.exists() {
+        std::fs::remove_file(state_path).map_err(|error| {
+            CliError::new(
+                1,
+                format!("{}: failed to remove: {error}", state_path.display()),
+            )
+        })?;
+    }
+
+    let now = app::now_iso8601();
+    let fresh = StateSnapshot {
+        created_at: Some(now.clone()),
+        updated_at: Some(now),
+        ..StateSnapshot::default()
+    };
+
+    store
+        .save(&fresh)
+        .map_err(|error| CliError::new(1, error.to_string()))?;
+
+    eprintln!("initialized state file {}", state_path.display());
+
+    Ok(())
+}
+
+/// Parses `--state <path>` from a minimal argument list.
+///
+/// Used by `status`, `purge`, and `init` which only need a state path.
+fn parse_state_flag(args: &[String], command: &str) -> Result<PathBuf, CliError> {
+    let mut index = 0;
+    while index < args.len() {
+        if args[index].as_str() == "--state" {
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| CliError::config("--state requires a value"))?;
+            return Ok(PathBuf::from(value));
+        }
+        index += 1;
+    }
+
+    Err(CliError::config(format!("{command} requires --state")))
+}
+
 fn build_cv_sink(cv_sink: &CvSinkConfig, precision: usize) -> Box<dyn CvSink> {
     match cv_sink {
         CvSinkConfig::Stdout => Box::new(StdoutCvSink { precision }),
@@ -114,9 +245,11 @@ fn print_iteration_json(record: &pid_ctl::app::IterationRecord) -> Result<(), Cl
 
 fn parse_once(args: &[String]) -> Result<OnceArgs, CliError> {
     let common = parse_common_args(args, CommandKind::Once)?;
-    let pv = common
-        .pv
-        .ok_or_else(|| CliError::config("once requires --pv <float>"))?;
+    let pv_source = common.pv_source.ok_or_else(|| {
+        CliError::config(
+            "once requires a PV source: --pv <float>, --pv-file <path>, or --pv-cmd <cmd>",
+        )
+    })?;
     let cv_sink = common.cv_sink.ok_or_else(|| {
         CliError::config("once requires exactly one CV sink: --cv-stdout or --cv-file <path>")
     })?;
@@ -131,7 +264,8 @@ fn parse_once(args: &[String]) -> Result<OnceArgs, CliError> {
     let pid_config = resolve_pid_config(&common.pid_flags, common.state_path.as_deref())?;
 
     Ok(OnceArgs {
-        pv,
+        pv_source,
+        cmd_timeout: common.cmd_timeout.unwrap_or(Duration::from_secs(5)),
         dt: common.dt,
         output_format: common.output_format,
         cv_sink,
@@ -258,61 +392,32 @@ fn parse_common_args(args: &[String], command_kind: CommandKind) -> Result<Commo
             continue;
         }
 
+        if handle_cv_option(
+            args[index].as_str(),
+            args,
+            &mut index,
+            command_kind,
+            &mut parsed,
+        )? {
+            index += 1;
+            continue;
+        }
+
+        if handle_pv_option(
+            args[index].as_str(),
+            args,
+            &mut index,
+            command_kind,
+            &mut parsed,
+        )? {
+            index += 1;
+            continue;
+        }
+
         match args[index].as_str() {
-            "--cv-stdout" => {
-                if matches!(command_kind, CommandKind::Pipe) {
-                    return Err(CliError::config(
-                        "pipe always writes CV to stdout in v1 — move actuator side effects to the next shell stage",
-                    ));
-                }
-
-                set_cv_sink(&mut parsed.cv_sink, CvSinkConfig::Stdout)?;
-            }
-            "--cv-file" => {
-                if matches!(command_kind, CommandKind::Pipe) {
-                    return Err(CliError::config(
-                        "pipe always writes CV to stdout in v1 — move actuator side effects to the next shell stage",
-                    ));
-                }
-
-                let path = parse_path_flag("--cv-file", args, &mut index)?;
-                set_cv_sink(&mut parsed.cv_sink, CvSinkConfig::File(path))?;
-            }
-            "--cv-cmd" => {
-                if matches!(command_kind, CommandKind::Pipe) {
-                    return Err(CliError::config(
-                        "pipe always writes CV to stdout in v1 — move actuator side effects to the next shell stage",
-                    ));
-                }
-
-                return Err(CliError::config(
-                    "--cv-cmd is not implemented yet in this slice",
-                ));
-            }
-            "--pv" => {
-                if matches!(command_kind, CommandKind::Pipe) {
-                    return Err(CliError::config(
-                        "pipe reads PV from stdin intrinsically — PV source flags are not accepted",
-                    ));
-                }
-
-                if parsed.pv.is_some() {
-                    return Err(CliError::config("only one PV source may be specified"));
-                }
-
-                parsed.pv = Some(parse_f64_flag("--pv", args, &mut index)?);
-            }
-            "--pv-file" | "--pv-cmd" | "--pv-stdin" => {
-                if matches!(command_kind, CommandKind::Pipe) {
-                    return Err(CliError::config(
-                        "pipe reads PV from stdin intrinsically — PV source flags are not accepted",
-                    ));
-                }
-
-                return Err(CliError::config(format!(
-                    "{} is not implemented yet in this slice",
-                    args[index]
-                )));
+            "--cmd-timeout" => {
+                let secs = parse_f64_flag("--cmd-timeout", args, &mut index)?;
+                parsed.cmd_timeout = Some(Duration::from_secs_f64(secs));
             }
             "--dry-run" => {
                 if matches!(command_kind, CommandKind::Pipe) {
@@ -418,6 +523,94 @@ fn handle_common_option(
     Ok(true)
 }
 
+fn handle_cv_option(
+    flag: &str,
+    args: &[String],
+    index: &mut usize,
+    command_kind: CommandKind,
+    parsed: &mut CommonArgs,
+) -> Result<bool, CliError> {
+    let pipe_err = || {
+        CliError::config(
+            "pipe always writes CV to stdout in v1 — move actuator side effects to the next shell stage",
+        )
+    };
+    match flag {
+        "--cv-stdout" => {
+            if matches!(command_kind, CommandKind::Pipe) {
+                return Err(pipe_err());
+            }
+            set_cv_sink(&mut parsed.cv_sink, CvSinkConfig::Stdout)?;
+        }
+        "--cv-file" => {
+            if matches!(command_kind, CommandKind::Pipe) {
+                return Err(pipe_err());
+            }
+            let path = parse_path_flag("--cv-file", args, index)?;
+            set_cv_sink(&mut parsed.cv_sink, CvSinkConfig::File(path))?;
+        }
+        "--cv-cmd" => {
+            if matches!(command_kind, CommandKind::Pipe) {
+                return Err(pipe_err());
+            }
+            return Err(CliError::config(
+                "--cv-cmd is not implemented yet in this slice",
+            ));
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn handle_pv_option(
+    flag: &str,
+    args: &[String],
+    index: &mut usize,
+    command_kind: CommandKind,
+    parsed: &mut CommonArgs,
+) -> Result<bool, CliError> {
+    let pipe_err = || {
+        CliError::config(
+            "pipe reads PV from stdin intrinsically — PV source flags are not accepted",
+        )
+    };
+    match flag {
+        "--pv" => {
+            if matches!(command_kind, CommandKind::Pipe) {
+                return Err(pipe_err());
+            }
+            set_pv_source(
+                &mut parsed.pv_source,
+                PvSourceConfig::Literal(parse_f64_flag("--pv", args, index)?),
+            )?;
+        }
+        "--pv-file" => {
+            if matches!(command_kind, CommandKind::Pipe) {
+                return Err(pipe_err());
+            }
+            let path = parse_path_flag("--pv-file", args, index)?;
+            set_pv_source(&mut parsed.pv_source, PvSourceConfig::File(path))?;
+        }
+        "--pv-cmd" => {
+            if matches!(command_kind, CommandKind::Pipe) {
+                return Err(pipe_err());
+            }
+            let cmd = parse_string_flag("--pv-cmd", args, index)?;
+            set_pv_source(&mut parsed.pv_source, PvSourceConfig::Cmd(cmd))?;
+        }
+        "--pv-stdin" => {
+            if matches!(command_kind, CommandKind::Pipe) {
+                return Err(pipe_err());
+            }
+            return Err(CliError::config(
+                "--pv-stdin is not implemented yet in this slice",
+            ));
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn set_cv_sink(current: &mut Option<CvSinkConfig>, next: CvSinkConfig) -> Result<(), CliError> {
     if current.is_some() {
         return Err(CliError::config("only one CV sink may be specified"));
@@ -425,6 +618,26 @@ fn set_cv_sink(current: &mut Option<CvSinkConfig>, next: CvSinkConfig) -> Result
 
     *current = Some(next);
     Ok(())
+}
+
+fn set_pv_source(
+    current: &mut Option<PvSourceConfig>,
+    next: PvSourceConfig,
+) -> Result<(), CliError> {
+    if current.is_some() {
+        return Err(CliError::config("only one PV source may be specified"));
+    }
+
+    *current = Some(next);
+    Ok(())
+}
+
+fn resolve_pv(source: &PvSourceConfig, cmd_timeout: Duration) -> io::Result<f64> {
+    match source {
+        PvSourceConfig::Literal(v) => Ok(*v),
+        PvSourceConfig::File(path) => FilePvSource::new(path.clone()).read_pv(),
+        PvSourceConfig::Cmd(cmd) => CmdPvSource::new(cmd.clone(), cmd_timeout).read_pv(),
+    }
 }
 
 fn parse_output_format(args: &[String], index: &mut usize) -> Result<OutputFormat, CliError> {
@@ -503,7 +716,7 @@ struct PidFlags {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct CommonArgs {
-    pv: Option<f64>,
+    pv_source: Option<PvSourceConfig>,
     pid_flags: PidFlags,
     output_format: OutputFormat,
     dt: f64,
@@ -513,11 +726,13 @@ struct CommonArgs {
     reset_accumulator: bool,
     scale: Option<f64>,
     cv_precision: Option<u32>,
+    cmd_timeout: Option<Duration>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct OnceArgs {
-    pv: f64,
+    pv_source: PvSourceConfig,
+    cmd_timeout: Duration,
     dt: f64,
     output_format: OutputFormat,
     cv_sink: CvSinkConfig,
@@ -527,6 +742,14 @@ struct OnceArgs {
     reset_accumulator: bool,
     scale: f64,
     cv_precision: usize,
+}
+
+/// Which PV source was specified on the CLI.
+#[derive(Clone, Debug, PartialEq)]
+enum PvSourceConfig {
+    Literal(f64),
+    File(PathBuf),
+    Cmd(String),
 }
 
 impl OnceArgs {

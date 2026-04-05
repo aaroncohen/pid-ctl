@@ -279,7 +279,8 @@ fn finite_value(value: f64) -> Option<f64> {
     value.is_finite().then_some(value)
 }
 
-fn now_iso8601() -> String {
+#[must_use]
+pub fn now_iso8601() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

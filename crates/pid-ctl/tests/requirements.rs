@@ -18,8 +18,12 @@ mod req_flag_validation;
 mod req_locking;
 #[path = "req/req_once_pipe.rs"]
 mod req_once_pipe;
+#[path = "req/req_pv_source.rs"]
+mod req_pv_source;
 #[path = "req/req_reliability.rs"]
 mod req_reliability;
+#[path = "req/req_state_commands.rs"]
+mod req_state_commands;
 #[path = "req/req_state_schema.rs"]
 mod req_state_schema;
 #[path = "req/req_stdout_contract.rs"]
