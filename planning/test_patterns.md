@@ -30,4 +30,5 @@ Versions are centralized in the root `Cargo.toml` `[workspace.dependencies]`; bu
 ## Learnings
 
 - **Cargo integration tests:** Only `crates/<pkg>/tests/*.rs` (one level) become test binaries. Putting every requirement file at `tests/req_foo.rs` creates **one binary per file** and duplicates runs. Keep a single `tests/requirements.rs` and pull modules from `tests/req/*.rs` via `#[path = "req/....rs"]` (see both crates).
+- **`loop` deadline scheduling:** Pure `Instant` math for `next_deadline_after_tick` lives in `pid_ctl::schedule` with unit tests in `src/schedule.rs` — no wall-clock sleeps or subprocesses needed to prove deadline-based vs `now + interval` drift behavior.
 - **Clippy `-D warnings`:** Avoid `assert!(true, "...")` smoke tests — use an empty `#[test] fn harness_smoke() {}` or a non-tautological assert.

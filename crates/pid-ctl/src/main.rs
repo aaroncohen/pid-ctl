@@ -1,5 +1,6 @@
 use pid_ctl::adapters::{CmdPvSource, CvSink, FileCvSink, FilePvSource, PvSource, StdoutCvSink};
 use pid_ctl::app::{self, ControllerSession, SessionConfig, StateSnapshot, StateStore};
+use pid_ctl::schedule::next_deadline_after_tick;
 use pid_ctl_core::{AntiWindupStrategy, PidConfig};
 use std::env;
 use std::fmt;
@@ -172,11 +173,13 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
             break;
         }
 
-        // Measure dt.
         let now = Instant::now();
+        let tick_deadline = next_deadline;
+        next_deadline = next_deadline_after_tick(tick_deadline, interval, now);
+
+        // Measure dt — wall-clock elapsed since last PID step (actual time between ticks).
         let dt = now.duration_since(last_tick).as_secs_f64();
         last_tick = now;
-        next_deadline = now + interval;
 
         // Interval slip detection.
         if dt > interval_secs * 1.5 {
