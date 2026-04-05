@@ -6,7 +6,7 @@ use std::fmt;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -37,6 +37,10 @@ fn run(args: &[String]) -> Result<(), CliError> {
             let parsed = parse_pipe(rest)?;
             run_pipe(&parsed)
         }
+        "loop" => {
+            let parsed = parse_loop(rest)?;
+            run_loop(&parsed)
+        }
         "status" => {
             let state_path = parse_state_flag(rest, "status")?;
             run_status(&state_path)
@@ -50,7 +54,7 @@ fn run(args: &[String]) -> Result<(), CliError> {
             run_init(&state_path)
         }
         other => Err(CliError::config(format!(
-            "unknown subcommand `{other}`; expected `once`, `pipe`, `status`, `purge`, or `init`"
+            "unknown subcommand `{other}`; expected `once`, `pipe`, `loop`, `status`, `purge`, or `init`"
         ))),
     }
 }
@@ -108,6 +112,130 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
     }
 
     Ok(())
+}
+
+fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
+    let mut session = ControllerSession::new(args.session_config())
+        .map_err(|error| CliError::config(error.to_string()))?;
+    let mut pv_source = build_pv_source(&args.pv_source, args.cmd_timeout);
+    let mut cv_sink = build_cv_sink(&args.cv_sink, args.cv_precision);
+
+    let interval = args.interval;
+    let mut next_deadline = Instant::now() + interval;
+    let mut last_tick = Instant::now();
+
+    loop {
+        // Sleep until next deadline
+        let now = Instant::now();
+        if now < next_deadline {
+            std::thread::sleep(next_deadline - now);
+        }
+
+        // Measure dt
+        let now = Instant::now();
+        let dt = now.duration_since(last_tick).as_secs_f64();
+        last_tick = now;
+        next_deadline = now + interval;
+
+        // Read PV
+        let raw_pv = match pv_source.read_pv() {
+            Ok(pv) => pv,
+            Err(error) => {
+                eprintln!("PV read failed: {error}");
+                // Skip tick on PV failure (reliability principle 3)
+                continue;
+            }
+        };
+
+        let scaled_pv = raw_pv * args.scale;
+
+        // Process tick
+        match session.process_pv(scaled_pv, dt, cv_sink.as_mut()) {
+            Ok(outcome) => {
+                if matches!(args.output_format, OutputFormat::Json)
+                    && let Err(error) = print_iteration_json(&outcome.record)
+                {
+                    eprintln!("output write failed: {error}");
+                }
+                if let Some(error) = outcome.state_write_failed {
+                    eprintln!("state write failed: {error}");
+                }
+            }
+            Err(error) => {
+                eprintln!("tick error: {error}");
+            }
+        }
+    }
+}
+
+fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
+    let common = parse_common_args(args, CommandKind::Loop)?;
+
+    // loop does not accept --pv <literal>
+    if matches!(common.pv_source, Some(PvSourceConfig::Literal(_))) {
+        return Err(CliError::config(
+            "loop requires --pv-file or --pv-cmd for PV source — use once for literal PV values",
+        ));
+    }
+
+    let pv_source = common
+        .pv_source
+        .ok_or_else(|| CliError::config("loop requires a PV source (--pv-file or --pv-cmd)"))?;
+
+    let cv_sink = common
+        .cv_sink
+        .ok_or_else(|| CliError::config("loop requires a CV sink (--cv-file or --cv-stdout)"))?;
+
+    let interval = common
+        .loop_interval
+        .ok_or_else(|| CliError::config("loop requires --interval"))?;
+
+    let pid_config = resolve_pid_config(&common.pid_flags, common.state_path.as_deref())?;
+
+    Ok(LoopArgs {
+        interval,
+        pv_source,
+        cv_sink,
+        pid_config,
+        state_path: common.state_path,
+        name: common.name,
+        reset_accumulator: common.reset_accumulator,
+        scale: common.scale.unwrap_or(1.0),
+        cv_precision: common.cv_precision.unwrap_or(2) as usize,
+        output_format: common.output_format,
+        cmd_timeout: common.cmd_timeout.unwrap_or(Duration::from_secs(5)),
+    })
+}
+
+fn build_pv_source(source: &PvSourceConfig, cmd_timeout: Duration) -> Box<dyn PvSource> {
+    match source {
+        PvSourceConfig::Literal(_) => unreachable!("loop rejects literal PV"),
+        PvSourceConfig::File(path) => Box::new(FilePvSource::new(path.clone())),
+        PvSourceConfig::Cmd(cmd) => Box::new(CmdPvSource::new(cmd.clone(), cmd_timeout)),
+    }
+}
+
+/// Parses a duration string such as `"2s"`, `"500ms"`, `"0.5"`, or `"1.5s"`.
+///
+/// - Suffix `ms` → milliseconds
+/// - Suffix `s` or no suffix → seconds (supports fractional)
+fn parse_duration_flag(flag: &str, value: &str) -> Result<Duration, CliError> {
+    if let Some(ms_str) = value.strip_suffix("ms") {
+        let ms = ms_str.parse::<f64>().map_err(|_| {
+            CliError::config(format!(
+                "{flag} expects a duration like '2s', '500ms', or '0.5s', got `{value}`"
+            ))
+        })?;
+        return Ok(Duration::from_secs_f64(ms / 1000.0));
+    }
+
+    let secs_str = value.strip_suffix('s').unwrap_or(value);
+    let secs = secs_str.parse::<f64>().map_err(|_| {
+        CliError::config(format!(
+            "{flag} expects a duration like '2s', '500ms', or '0.5s', got `{value}`"
+        ))
+    })?;
+    Ok(Duration::from_secs_f64(secs))
 }
 
 fn run_status(state_path: &std::path::Path) -> Result<(), CliError> {
@@ -517,6 +645,10 @@ fn handle_common_option(
         "--cv-precision" => {
             parsed.cv_precision = Some(parse_u32_flag("--cv-precision", args, index)?);
         }
+        "--interval" => {
+            let value = next_value("--interval", args, index)?;
+            parsed.loop_interval = Some(parse_duration_flag("--interval", &value)?);
+        }
         _ => return Ok(false),
     }
 
@@ -578,6 +710,11 @@ fn handle_pv_option(
         "--pv" => {
             if matches!(command_kind, CommandKind::Pipe) {
                 return Err(pipe_err());
+            }
+            if matches!(command_kind, CommandKind::Loop) {
+                return Err(CliError::config(
+                    "loop requires --pv-file or --pv-cmd for PV source — use once for literal PV values",
+                ));
             }
             set_pv_source(
                 &mut parsed.pv_source,
@@ -690,6 +827,7 @@ fn next_value(flag: &str, args: &[String], index: &mut usize) -> Result<String, 
 enum CommandKind {
     Once,
     Pipe,
+    Loop,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -727,6 +865,7 @@ struct CommonArgs {
     scale: Option<f64>,
     cv_precision: Option<u32>,
     cmd_timeout: Option<Duration>,
+    loop_interval: Option<Duration>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -775,6 +914,32 @@ struct PipeArgs {
 }
 
 impl PipeArgs {
+    fn session_config(&self) -> SessionConfig {
+        SessionConfig {
+            name: self.name.clone(),
+            pid: self.pid_config.clone(),
+            state_store: self.state_path.clone().map(StateStore::new),
+            reset_accumulator: self.reset_accumulator,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LoopArgs {
+    interval: Duration,
+    pv_source: PvSourceConfig,
+    cv_sink: CvSinkConfig,
+    pid_config: PidConfig,
+    state_path: Option<PathBuf>,
+    name: Option<String>,
+    reset_accumulator: bool,
+    scale: f64,
+    cv_precision: usize,
+    output_format: OutputFormat,
+    cmd_timeout: Duration,
+}
+
+impl LoopArgs {
     fn session_config(&self) -> SessionConfig {
         SessionConfig {
             name: self.name.clone(),

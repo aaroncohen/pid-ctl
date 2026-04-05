@@ -16,6 +16,8 @@ mod req_flag_precedence;
 mod req_flag_validation;
 #[path = "req/req_locking.rs"]
 mod req_locking;
+#[path = "req/req_loop.rs"]
+mod req_loop;
 #[path = "req/req_once_pipe.rs"]
 mod req_once_pipe;
 #[path = "req/req_pv_source.rs"]
