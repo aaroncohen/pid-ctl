@@ -143,8 +143,8 @@ impl ControllerSession {
             last_cv: Some(confirmed_applied_cv),
             last_pv: self.controller.last_pv(),
             iter: self.snapshot.iter.saturating_add(1),
-            created_at: self.snapshot.created_at.clone(),
-            updated_at: self.snapshot.updated_at.clone(),
+            created_at: self.snapshot.created_at.clone().or_else(|| Some(now_iso8601())),
+            updated_at: Some(now_iso8601()),
         }
     }
 
@@ -273,6 +273,67 @@ impl Error for TickError {
 
 fn finite_value(value: f64) -> Option<f64> {
     value.is_finite().then_some(value)
+}
+
+fn now_iso8601() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (year, month, day, hour, min, sec) = timestamp_to_utc(secs);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
+/// Converts Unix seconds to (year, month, day, hour, min, sec) in UTC.
+fn timestamp_to_utc(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
+    let sec = secs % 60;
+    let mins = secs / 60;
+    let min = mins % 60;
+    let hours = mins / 60;
+    let hour = hours % 24;
+    let days = hours / 24;
+
+    let mut year = 1970u64;
+    let mut remaining_days = days;
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    let month_days: [u64; 12] = [
+        31,
+        if is_leap_year(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1u64;
+    for &days_in_month in &month_days {
+        if remaining_days < days_in_month {
+            break;
+        }
+        remaining_days -= days_in_month;
+        month += 1;
+    }
+    let day = remaining_days + 1;
+
+    (year, month, day, hour, min, sec)
+}
+
+fn is_leap_year(year: u64) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 fn resolve_controller_name(

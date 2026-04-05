@@ -121,12 +121,14 @@ fn parse_once(args: &[String]) -> Result<OnceArgs, CliError> {
         ));
     }
 
+    let pid_config = resolve_pid_config(&common.pid_flags, common.state_path.as_deref())?;
+
     Ok(OnceArgs {
         pv,
         dt: common.dt,
         output_format: common.output_format,
         cv_sink,
-        pid_config: common.pid_config,
+        pid_config,
         state_path: common.state_path,
         name: common.name,
         reset_accumulator: common.reset_accumulator,
@@ -142,21 +144,86 @@ fn parse_pipe(args: &[String]) -> Result<PipeArgs, CliError> {
         ));
     }
 
+    let pid_config = resolve_pid_config(&common.pid_flags, common.state_path.as_deref())?;
+
     Ok(PipeArgs {
         dt: common.dt,
-        pid_config: common.pid_config,
+        pid_config,
         state_path: common.state_path,
         name: common.name,
         reset_accumulator: common.reset_accumulator,
     })
 }
 
+/// Merges CLI PID flags with any values stored in the state file.
+///
+/// Priority: CLI flag > state file value > `PidConfig` default.
+/// Returns an error (exit 3) if setpoint is absent from both CLI and state file.
+fn resolve_pid_config(
+    flags: &PidFlags,
+    state_path: Option<&std::path::Path>,
+) -> Result<PidConfig, CliError> {
+    // Load snapshot for config merging (read-only, no lock). ControllerSession::new
+    // will re-load under lock for runtime state — safe because save uses atomic rename.
+    let snapshot = if let Some(path) = state_path {
+        let store = StateStore::new(path);
+        store
+            .load()
+            .map_err(|error| CliError::config(error.to_string()))?
+    } else {
+        None
+    };
+
+    let snap = snapshot.as_ref();
+
+    // Resolve setpoint — required if absent from both CLI and state file.
+    let setpoint = match flags.setpoint {
+        Some(v) => v,
+        None => snap
+            .and_then(|s| s.setpoint)
+            .ok_or_else(|| CliError::config("--setpoint is required on first run (no setpoint in state file)"))?,
+    };
+
+    let defaults = PidConfig::default();
+
+    let kp = flags.kp
+        .or_else(|| snap.and_then(|s| s.kp))
+        .unwrap_or(defaults.kp);
+    let ki = flags.ki
+        .or_else(|| snap.and_then(|s| s.ki))
+        .unwrap_or(defaults.ki);
+    let kd = flags.kd
+        .or_else(|| snap.and_then(|s| s.kd))
+        .unwrap_or(defaults.kd);
+    let out_min = flags.out_min
+        .or_else(|| snap.and_then(|s| s.out_min))
+        .unwrap_or(defaults.out_min);
+    let out_max = flags.out_max
+        .or_else(|| snap.and_then(|s| s.out_max))
+        .unwrap_or(defaults.out_max);
+    let deadband = flags.deadband.unwrap_or(defaults.deadband);
+    let setpoint_ramp = flags.setpoint_ramp.or(defaults.setpoint_ramp);
+    let slew_rate = flags.slew_rate.or(defaults.slew_rate);
+    let pv_filter_alpha = flags.pv_filter_alpha.unwrap_or(defaults.pv_filter_alpha);
+
+    Ok(PidConfig {
+        setpoint,
+        kp,
+        ki,
+        kd,
+        out_min,
+        out_max,
+        deadband,
+        setpoint_ramp,
+        slew_rate,
+        pv_filter_alpha,
+        anti_windup: AntiWindupStrategy::BackCalculation,
+        anti_windup_tt: None,
+    })
+}
+
 fn parse_common_args(args: &[String], command_kind: CommandKind) -> Result<CommonArgs, CliError> {
     let mut parsed = CommonArgs {
-        pid_config: PidConfig {
-            anti_windup: AntiWindupStrategy::BackCalculation,
-            ..PidConfig::default()
-        },
         output_format: OutputFormat::Text,
         dt: 1.0,
         ..CommonArgs::default()
@@ -205,6 +272,19 @@ fn parse_common_args(args: &[String], command_kind: CommandKind) -> Result<Commo
                     "--cv-cmd is not implemented yet in this slice",
                 ));
             }
+            "--pv" => {
+                if matches!(command_kind, CommandKind::Pipe) {
+                    return Err(CliError::config(
+                        "pipe reads PV from stdin intrinsically — PV source flags are not accepted",
+                    ));
+                }
+
+                if parsed.pv.is_some() {
+                    return Err(CliError::config("only one PV source may be specified"));
+                }
+
+                parsed.pv = Some(parse_f64_flag("--pv", args, &mut index)?);
+            }
             "--pv-file" | "--pv-cmd" | "--pv-stdin" => {
                 if matches!(command_kind, CommandKind::Pipe) {
                     return Err(CliError::config(
@@ -251,38 +331,36 @@ fn handle_pid_option(
     parsed: &mut CommonArgs,
 ) -> Result<bool, CliError> {
     match flag {
-        "--pv" => {
-            parsed.pv = Some(parse_f64_flag("--pv", args, index)?);
-        }
         "--setpoint" => {
-            parsed.pid_config.setpoint = parse_f64_flag("--setpoint", args, index)?;
+            parsed.pid_flags.setpoint = Some(parse_f64_flag("--setpoint", args, index)?);
         }
         "--kp" => {
-            parsed.pid_config.kp = parse_f64_flag("--kp", args, index)?;
+            parsed.pid_flags.kp = Some(parse_f64_flag("--kp", args, index)?);
         }
         "--ki" => {
-            parsed.pid_config.ki = parse_f64_flag("--ki", args, index)?;
+            parsed.pid_flags.ki = Some(parse_f64_flag("--ki", args, index)?);
         }
         "--kd" => {
-            parsed.pid_config.kd = parse_f64_flag("--kd", args, index)?;
+            parsed.pid_flags.kd = Some(parse_f64_flag("--kd", args, index)?);
         }
         "--out-min" => {
-            parsed.pid_config.out_min = parse_f64_flag("--out-min", args, index)?;
+            parsed.pid_flags.out_min = Some(parse_f64_flag("--out-min", args, index)?);
         }
         "--out-max" => {
-            parsed.pid_config.out_max = parse_f64_flag("--out-max", args, index)?;
+            parsed.pid_flags.out_max = Some(parse_f64_flag("--out-max", args, index)?);
         }
         "--deadband" => {
-            parsed.pid_config.deadband = parse_f64_flag("--deadband", args, index)?;
+            parsed.pid_flags.deadband = Some(parse_f64_flag("--deadband", args, index)?);
         }
         "--setpoint-ramp" => {
-            parsed.pid_config.setpoint_ramp = Some(parse_f64_flag("--setpoint-ramp", args, index)?);
+            parsed.pid_flags.setpoint_ramp = Some(parse_f64_flag("--setpoint-ramp", args, index)?);
         }
         "--slew-rate" => {
-            parsed.pid_config.slew_rate = Some(parse_f64_flag("--slew-rate", args, index)?);
+            parsed.pid_flags.slew_rate = Some(parse_f64_flag("--slew-rate", args, index)?);
         }
         "--pv-filter" => {
-            parsed.pid_config.pv_filter_alpha = parse_f64_flag("--pv-filter", args, index)?;
+            parsed.pid_flags.pv_filter_alpha =
+                Some(parse_f64_flag("--pv-filter", args, index)?);
         }
         _ => return Ok(false),
     }
@@ -377,10 +455,25 @@ enum OutputFormat {
     Json,
 }
 
+/// PID parameters as optional values — `None` means "not set on CLI".
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PidFlags {
+    setpoint: Option<f64>,
+    kp: Option<f64>,
+    ki: Option<f64>,
+    kd: Option<f64>,
+    out_min: Option<f64>,
+    out_max: Option<f64>,
+    deadband: Option<f64>,
+    setpoint_ramp: Option<f64>,
+    slew_rate: Option<f64>,
+    pv_filter_alpha: Option<f64>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct CommonArgs {
     pv: Option<f64>,
-    pid_config: PidConfig,
+    pid_flags: PidFlags,
     output_format: OutputFormat,
     dt: f64,
     cv_sink: Option<CvSinkConfig>,
