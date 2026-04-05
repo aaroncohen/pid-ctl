@@ -6,6 +6,8 @@ use std::fmt;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -120,51 +122,165 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
     let mut pv_source = build_pv_source(&args.pv_source, args.cmd_timeout);
     let mut cv_sink = build_cv_sink(&args.cv_sink, args.cv_precision);
 
+    // Open optional NDJSON log file.
+    let mut log_file = if let Some(ref path) = args.log_path {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|error| {
+                CliError::new(
+                    1,
+                    format!("failed to open log file {}: {error}", path.display()),
+                )
+            })?;
+        Some(file)
+    } else {
+        None
+    };
+
+    // Set up SIGTERM/SIGINT shutdown flag.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    ctrlc::set_handler(move || {
+        shutdown_clone.store(true, Ordering::Relaxed);
+    })
+    .expect("signal handler");
+
     let interval = args.interval;
+    let interval_secs = interval.as_secs_f64();
     let mut next_deadline = Instant::now() + interval;
     let mut last_tick = Instant::now();
+    let mut cv_fail_count: u32 = 0;
 
     loop {
-        // Sleep until next deadline
+        // Check shutdown flag at top of each iteration.
+        if shutdown.load(Ordering::Relaxed) {
+            write_safe_cv(args.safe_cv, cv_sink.as_mut());
+            break;
+        }
+
+        // Sleep until next deadline.
         let now = Instant::now();
         if now < next_deadline {
             std::thread::sleep(next_deadline - now);
         }
 
-        // Measure dt
+        // Check shutdown again after sleeping (signal may have arrived during sleep).
+        if shutdown.load(Ordering::Relaxed) {
+            write_safe_cv(args.safe_cv, cv_sink.as_mut());
+            break;
+        }
+
+        // Measure dt.
         let now = Instant::now();
         let dt = now.duration_since(last_tick).as_secs_f64();
         last_tick = now;
         next_deadline = now + interval;
 
-        // Read PV
+        // Interval slip detection.
+        if dt > interval_secs * 1.5 {
+            eprintln!(
+                "interval slip: tick took {:.0}ms (interval: {:.0}ms)",
+                dt * 1000.0,
+                interval_secs * 1000.0
+            );
+        }
+
+        // dt bounds check — skip tick if out of range.
+        if dt < args.min_dt {
+            eprintln!(
+                "dt {dt:.6}s below min_dt {:.6}s — skipping tick",
+                args.min_dt
+            );
+            continue;
+        }
+        if dt > args.max_dt {
+            eprintln!(
+                "dt {dt:.6}s exceeds max_dt {:.6}s — skipping tick",
+                args.max_dt
+            );
+            continue;
+        }
+
+        // Read PV.
         let raw_pv = match pv_source.read_pv() {
             Ok(pv) => pv,
             Err(error) => {
                 eprintln!("PV read failed: {error}");
-                // Skip tick on PV failure (reliability principle 3)
                 continue;
             }
         };
 
-        let scaled_pv = raw_pv * args.scale;
+        run_loop_tick(
+            args,
+            raw_pv,
+            dt,
+            &mut session,
+            cv_sink.as_mut(),
+            &mut log_file,
+            &mut cv_fail_count,
+        )?;
+    }
 
-        // Process tick
-        match session.process_pv(scaled_pv, dt, cv_sink.as_mut()) {
-            Ok(outcome) => {
-                if matches!(args.output_format, OutputFormat::Json)
-                    && let Err(error) = print_iteration_json(&outcome.record)
-                {
-                    eprintln!("output write failed: {error}");
-                }
-                if let Some(error) = outcome.state_write_failed {
-                    eprintln!("state write failed: {error}");
-                }
+    Ok(())
+}
+
+/// Executes one PID tick: computes CV, writes to sink, logs outcome.
+///
+/// Returns `Err` when CV write failures exceed the configured limit.
+fn run_loop_tick(
+    args: &LoopArgs,
+    raw_pv: f64,
+    dt: f64,
+    session: &mut ControllerSession,
+    cv_sink: &mut dyn CvSink,
+    log_file: &mut Option<std::fs::File>,
+    cv_fail_count: &mut u32,
+) -> Result<(), CliError> {
+    let scaled_pv = raw_pv * args.scale;
+
+    match session.process_pv(scaled_pv, dt, cv_sink) {
+        Ok(outcome) => {
+            *cv_fail_count = 0;
+
+            if matches!(args.output_format, OutputFormat::Json)
+                && let Err(error) = print_iteration_json(&outcome.record)
+            {
+                eprintln!("output write failed: {error}");
             }
-            Err(error) => {
-                eprintln!("tick error: {error}");
+
+            if let Some(file) = log_file
+                && let Ok(json) = serde_json::to_string(&outcome.record)
+            {
+                let _ = writeln!(file, "{json}");
+            }
+
+            if let Some(error) = outcome.state_write_failed {
+                eprintln!("state write failed: {error}");
             }
         }
+        Err(error) => {
+            *cv_fail_count += 1;
+            let limit = args.cv_fail_after;
+            eprintln!("CV write failed ({cv_fail_count}/{limit}): {error}");
+            if *cv_fail_count >= limit {
+                write_safe_cv(args.safe_cv, cv_sink);
+                return Err(CliError::new(
+                    2,
+                    format!("exiting after {cv_fail_count} consecutive CV write failures"),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Writes the safe-cv value to the sink if one is configured.
+fn write_safe_cv(safe_cv: Option<f64>, cv_sink: &mut dyn CvSink) {
+    if let Some(cv) = safe_cv {
+        let _ = cv_sink.write_cv(cv);
     }
 }
 
@@ -192,6 +308,12 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
 
     let pid_config = resolve_pid_config(&common.pid_flags, common.state_path.as_deref())?;
 
+    // Default max_dt is 3×interval or 60.0 if interval is very large.
+    let interval_secs = interval.as_secs_f64();
+    let max_dt_default = (interval_secs * 3.0).min(60.0);
+    // Ensure max_dt_default is never below min_dt default (0.01).
+    let max_dt_default = max_dt_default.max(0.01);
+
     Ok(LoopArgs {
         interval,
         pv_source,
@@ -204,6 +326,11 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         cv_precision: common.cv_precision.unwrap_or(2) as usize,
         output_format: common.output_format,
         cmd_timeout: common.cmd_timeout.unwrap_or(Duration::from_secs(5)),
+        safe_cv: common.safe_cv,
+        cv_fail_after: common.cv_fail_after.unwrap_or(10),
+        min_dt: common.min_dt.unwrap_or(0.01),
+        max_dt: common.max_dt.unwrap_or(max_dt_default),
+        log_path: common.log_path,
     })
 }
 
@@ -649,6 +776,21 @@ fn handle_common_option(
             let value = next_value("--interval", args, index)?;
             parsed.loop_interval = Some(parse_duration_flag("--interval", &value)?);
         }
+        "--safe-cv" => {
+            parsed.safe_cv = Some(parse_f64_flag("--safe-cv", args, index)?);
+        }
+        "--cv-fail-after" => {
+            parsed.cv_fail_after = Some(parse_u32_flag("--cv-fail-after", args, index)?);
+        }
+        "--min-dt" => {
+            parsed.min_dt = Some(parse_f64_flag("--min-dt", args, index)?);
+        }
+        "--max-dt" => {
+            parsed.max_dt = Some(parse_f64_flag("--max-dt", args, index)?);
+        }
+        "--log" => {
+            parsed.log_path = Some(parse_path_flag("--log", args, index)?);
+        }
         _ => return Ok(false),
     }
 
@@ -866,6 +1008,11 @@ struct CommonArgs {
     cv_precision: Option<u32>,
     cmd_timeout: Option<Duration>,
     loop_interval: Option<Duration>,
+    safe_cv: Option<f64>,
+    cv_fail_after: Option<u32>,
+    min_dt: Option<f64>,
+    max_dt: Option<f64>,
+    log_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -937,6 +1084,11 @@ struct LoopArgs {
     cv_precision: usize,
     output_format: OutputFormat,
     cmd_timeout: Duration,
+    safe_cv: Option<f64>,
+    cv_fail_after: u32,
+    min_dt: f64,
+    max_dt: f64,
+    log_path: Option<PathBuf>,
 }
 
 impl LoopArgs {
