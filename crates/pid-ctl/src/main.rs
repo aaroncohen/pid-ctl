@@ -211,6 +211,7 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
             Ok(pv) => pv,
             Err(error) => {
                 eprintln!("PV read failed: {error}");
+                write_safe_cv(args.safe_cv, cv_sink.as_mut());
                 continue;
             }
         };
