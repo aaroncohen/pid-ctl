@@ -3,7 +3,13 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+use wait_timeout::ChildExt;
 
 /// Destination for computed controller output values.
 pub trait CvSink {
@@ -103,8 +109,9 @@ impl PvSource for FilePvSource {
 
 /// Executes a shell command and parses its stdout as [`f64`].
 ///
-/// The `timeout` field is stored for future loop-mode enforcement; command
-/// execution is currently synchronous.
+/// Each read waits on the shell child for at most [`CmdPvSource`]'s `timeout`.
+/// On timeout the child process group is killed where supported (Unix), so
+/// hung commands do not block the controller indefinitely.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CmdPvSource {
     command: String,
@@ -119,25 +126,77 @@ impl CmdPvSource {
     }
 }
 
+fn join_stdout_reader(handle: thread::JoinHandle<io::Result<String>>) -> io::Result<String> {
+    handle
+        .join()
+        .map_err(|_| io::Error::other("PV command stdout reader panicked"))?
+}
+
+/// Best-effort: terminate the whole process group (Unix) so `sh -c` children
+/// cannot outlive the timeout. Falls back to [`Child::kill`] on other targets.
+fn kill_child_process_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        let _ = Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+}
+
 impl PvSource for CmdPvSource {
     fn read_pv(&mut self) -> io::Result<f64> {
-        let _ = self.timeout; // reserved for future kill-on-timeout logic
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &self.command]);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::null());
+        #[cfg(unix)]
+        cmd.process_group(0);
 
-        let mut child = Command::new("sh")
-            .args(["-c", &self.command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let mut child = cmd.spawn()?;
 
-        let mut stdout = child
+        let stdout = child
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("failed to capture command stdout"))?;
 
-        let mut output = String::new();
-        stdout.read_to_string(&mut output)?;
+        let reader = thread::spawn(move || {
+            let mut s = String::new();
+            let mut stdout = stdout;
+            stdout.read_to_string(&mut s)?;
+            Ok(s)
+        });
 
-        let status = child.wait()?;
+        let outcome = child.wait_timeout(self.timeout);
+        let (status, output) = match outcome {
+            Ok(Some(status)) => {
+                let output = join_stdout_reader(reader)?;
+                (status, output)
+            }
+            Ok(None) => {
+                kill_child_process_tree(&mut child);
+                let _ = child.wait();
+                let _ = join_stdout_reader(reader);
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "PV command timed out after {:?}: `{}`",
+                        self.timeout, self.command
+                    ),
+                ));
+            }
+            Err(e) => {
+                kill_child_process_tree(&mut child);
+                let _ = child.wait();
+                let _ = join_stdout_reader(reader);
+                return Err(e);
+            }
+        };
+
         if !status.success() {
             return Err(io::Error::other(format!(
                 "PV command exited with {status}: {}",

@@ -1,6 +1,9 @@
 //! PV source adapter tests — `--pv-file` and `--pv-cmd`.
 //! Covers bead pid-ctl-nvs.
 
+#[cfg(unix)]
+use std::time::{Duration, Instant};
+
 use assert_cmd::Command;
 use predicates::str::starts_with;
 use tempfile::tempdir;
@@ -34,6 +37,24 @@ fn once_pv_file_trims_whitespace() {
     cmd.args(["--setpoint", "55.0", "--kp", "1.0", "--cv-stdout"]);
 
     cmd.assert().success().stdout(starts_with("4.50"));
+}
+
+/// `CmdPvSource` enforces a wall-clock bound: a long-running command returns
+/// [`std::io::ErrorKind::TimedOut`] quickly (Reliability: bounded waits).
+#[cfg(unix)]
+#[test]
+fn pv_cmd_read_respects_cmd_timeout() {
+    use pid_ctl::adapters::{CmdPvSource, PvSource};
+
+    let mut src = CmdPvSource::new("sleep 2".into(), Duration::from_millis(200));
+    let start = Instant::now();
+    let err = src.read_pv().expect_err("expected timeout");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "expected failure well before sleep 2s, took {:?}",
+        start.elapsed()
+    );
 }
 
 /// `once --pv-cmd` executes a command and uses stdout as PV.
