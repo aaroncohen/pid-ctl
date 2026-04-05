@@ -1,0 +1,17 @@
+[package]
+name = "pid-ctl-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Deterministic PID control math for pid-ctl (see repository pid-ctl_plan.md)"
+
+[dependencies]
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
