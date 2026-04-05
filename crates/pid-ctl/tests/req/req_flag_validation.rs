@@ -67,6 +67,48 @@ fn scale_multiplies_raw_pv_before_pid() {
         .stdout(predicates::str::starts_with("5"));
 }
 
+/// pid-ctl-8vb.7: pipe rejects --cv-file — pipe always writes CV to stdout.
+#[test]
+fn pipe_rejects_cv_file() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args(["pipe", "--setpoint", "55.0", "--cv-file", "/tmp/x"]);
+    cmd.write_stdin("54.0\n");
+
+    cmd.assert()
+        .code(3)
+        .stderr(contains("pipe always writes CV to stdout"));
+}
+
+/// pid-ctl-8vb.7: specifying both --cv-stdout and --cv-file is rejected with exit 3.
+#[test]
+fn multiple_cv_sinks_rejected() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv",
+        "50.0",
+        "--setpoint",
+        "55.0",
+        "--cv-stdout",
+        "--cv-file",
+        "/tmp/x",
+    ]);
+
+    cmd.assert().code(3).stderr(contains("only one CV sink"));
+}
+
+/// pid-ctl-8vb.7: pipe rejects --dry-run with exit 3.
+#[test]
+fn pipe_rejects_dry_run() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args(["pipe", "--setpoint", "55.0", "--dry-run"]);
+    cmd.write_stdin("54.0\n");
+
+    cmd.assert()
+        .code(3)
+        .stderr(contains("not meaningful with pipe"));
+}
+
 /// pid-ctl-7q1: --cv-precision controls decimal places in CV output.
 #[test]
 fn cv_precision_controls_output_decimal_places() {
