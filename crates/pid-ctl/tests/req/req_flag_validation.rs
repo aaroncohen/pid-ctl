@@ -26,7 +26,14 @@ fn pipe_rejects_pv_literal_flag() {
 fn duplicate_pv_flags_rejected() {
     let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
     cmd.args([
-        "once", "--pv", "50.0", "--pv", "60.0", "--setpoint", "55.0", "--cv-stdout",
+        "once",
+        "--pv",
+        "50.0",
+        "--pv",
+        "60.0",
+        "--setpoint",
+        "55.0",
+        "--cv-stdout",
     ]);
 
     cmd.assert()
@@ -38,7 +45,6 @@ fn duplicate_pv_flags_rejected() {
 
 /// pid-ctl-7q1: --scale multiplies raw PV before filtering or PID.
 #[test]
-#[ignore = "pid-ctl-7q1: --scale not implemented yet"]
 fn scale_multiplies_raw_pv_before_pid() {
     // --pv 50000 --scale 0.001 => effective PV 50.0, error = 55.0 - 50.0 = 5.0
     // kp=1.0 => CV = 5.0
@@ -63,7 +69,6 @@ fn scale_multiplies_raw_pv_before_pid() {
 
 /// pid-ctl-7q1: --cv-precision controls decimal places in CV output.
 #[test]
-#[ignore = "pid-ctl-7q1: --cv-precision not implemented yet"]
 fn cv_precision_controls_output_decimal_places() {
     let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
     cmd.args([

@@ -16,14 +16,22 @@ pub trait CvSink {
 }
 
 /// Writes controller output to stdout, one value per line.
-#[derive(Debug, Default)]
-pub struct StdoutCvSink;
+#[derive(Debug)]
+pub struct StdoutCvSink {
+    pub precision: usize,
+}
+
+impl Default for StdoutCvSink {
+    fn default() -> Self {
+        Self { precision: 2 }
+    }
+}
 
 impl CvSink for StdoutCvSink {
     fn write_cv(&mut self, cv: f64) -> io::Result<()> {
         let stdout = io::stdout();
         let mut handle = stdout.lock();
-        writeln!(handle, "{cv}")
+        writeln!(handle, "{cv:.prec$}", prec = self.precision)
     }
 }
 
@@ -31,17 +39,21 @@ impl CvSink for StdoutCvSink {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileCvSink {
     path: PathBuf,
+    pub precision: usize,
 }
 
 impl FileCvSink {
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            precision: 2,
+        }
     }
 }
 
 impl CvSink for FileCvSink {
     fn write_cv(&mut self, cv: f64) -> io::Result<()> {
-        fs::write(&self.path, format!("{cv}\n"))
+        fs::write(&self.path, format!("{cv:.prec$}\n", prec = self.precision))
     }
 }

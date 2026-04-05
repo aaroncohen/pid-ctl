@@ -58,7 +58,13 @@ fn cli_flags_override_state_file_values() {
 
     let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
     cmd.args([
-        "once", "--pv", "50.0", "--kp", "1.0", "--cv-stdout", "--state",
+        "once",
+        "--pv",
+        "50.0",
+        "--kp",
+        "1.0",
+        "--cv-stdout",
+        "--state",
     ]);
     cmd.arg(&state_path);
 

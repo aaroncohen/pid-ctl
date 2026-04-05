@@ -43,9 +43,10 @@ fn run(args: &[String]) -> Result<(), CliError> {
 fn run_once(args: &OnceArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
-    let mut sink = build_cv_sink(&args.cv_sink);
+    let mut sink = build_cv_sink(&args.cv_sink, args.cv_precision);
 
-    match session.process_pv(args.pv, args.dt, sink.as_mut()) {
+    let scaled_pv = args.pv * args.scale;
+    match session.process_pv(scaled_pv, args.dt, sink.as_mut()) {
         Ok(outcome) => {
             if matches!(args.output_format, OutputFormat::Json) {
                 print_iteration_json(&outcome.record)?;
@@ -67,7 +68,9 @@ fn run_once(args: &OnceArgs) -> Result<(), CliError> {
 fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
-    let mut sink = StdoutCvSink;
+    let mut sink = StdoutCvSink {
+        precision: args.cv_precision,
+    };
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -77,7 +80,7 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
             continue;
         }
 
-        let pv = parse_f64_value("--stdin", trimmed)?;
+        let pv = parse_f64_value("--stdin", trimmed)? * args.scale;
         let outcome = session
             .process_pv(pv, args.dt, &mut sink)
             .map_err(|error| CliError::new(1, error.to_string()))?;
@@ -90,10 +93,14 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-fn build_cv_sink(cv_sink: &CvSinkConfig) -> Box<dyn CvSink> {
+fn build_cv_sink(cv_sink: &CvSinkConfig, precision: usize) -> Box<dyn CvSink> {
     match cv_sink {
-        CvSinkConfig::Stdout => Box::new(StdoutCvSink),
-        CvSinkConfig::File(path) => Box::new(FileCvSink::new(path.clone())),
+        CvSinkConfig::Stdout => Box::new(StdoutCvSink { precision }),
+        CvSinkConfig::File(path) => {
+            let mut sink = FileCvSink::new(path.clone());
+            sink.precision = precision;
+            Box::new(sink)
+        }
     }
 }
 
@@ -132,6 +139,8 @@ fn parse_once(args: &[String]) -> Result<OnceArgs, CliError> {
         state_path: common.state_path,
         name: common.name,
         reset_accumulator: common.reset_accumulator,
+        scale: common.scale.unwrap_or(1.0),
+        cv_precision: common.cv_precision.unwrap_or(2) as usize,
     })
 }
 
@@ -152,6 +161,8 @@ fn parse_pipe(args: &[String]) -> Result<PipeArgs, CliError> {
         state_path: common.state_path,
         name: common.name,
         reset_accumulator: common.reset_accumulator,
+        scale: common.scale.unwrap_or(1.0),
+        cv_precision: common.cv_precision.unwrap_or(2) as usize,
     })
 }
 
@@ -179,26 +190,31 @@ fn resolve_pid_config(
     // Resolve setpoint — required if absent from both CLI and state file.
     let setpoint = match flags.setpoint {
         Some(v) => v,
-        None => snap
-            .and_then(|s| s.setpoint)
-            .ok_or_else(|| CliError::config("--setpoint is required on first run (no setpoint in state file)"))?,
+        None => snap.and_then(|s| s.setpoint).ok_or_else(|| {
+            CliError::config("--setpoint is required on first run (no setpoint in state file)")
+        })?,
     };
 
     let defaults = PidConfig::default();
 
-    let kp = flags.kp
+    let kp = flags
+        .kp
         .or_else(|| snap.and_then(|s| s.kp))
         .unwrap_or(defaults.kp);
-    let ki = flags.ki
+    let ki = flags
+        .ki
         .or_else(|| snap.and_then(|s| s.ki))
         .unwrap_or(defaults.ki);
-    let kd = flags.kd
+    let kd = flags
+        .kd
         .or_else(|| snap.and_then(|s| s.kd))
         .unwrap_or(defaults.kd);
-    let out_min = flags.out_min
+    let out_min = flags
+        .out_min
         .or_else(|| snap.and_then(|s| s.out_min))
         .unwrap_or(defaults.out_min);
-    let out_max = flags.out_max
+    let out_max = flags
+        .out_max
         .or_else(|| snap.and_then(|s| s.out_max))
         .unwrap_or(defaults.out_max);
     let deadband = flags.deadband.unwrap_or(defaults.deadband);
@@ -219,6 +235,7 @@ fn resolve_pid_config(
         pv_filter_alpha,
         anti_windup: AntiWindupStrategy::BackCalculation,
         anti_windup_tt: None,
+        tt_upper_bound: None,
     })
 }
 
@@ -359,8 +376,7 @@ fn handle_pid_option(
             parsed.pid_flags.slew_rate = Some(parse_f64_flag("--slew-rate", args, index)?);
         }
         "--pv-filter" => {
-            parsed.pid_flags.pv_filter_alpha =
-                Some(parse_f64_flag("--pv-filter", args, index)?);
+            parsed.pid_flags.pv_filter_alpha = Some(parse_f64_flag("--pv-filter", args, index)?);
         }
         _ => return Ok(false),
     }
@@ -389,6 +405,12 @@ fn handle_common_option(
         }
         "--reset-accumulator" => {
             parsed.reset_accumulator = true;
+        }
+        "--scale" => {
+            parsed.scale = Some(parse_f64_flag("--scale", args, index)?);
+        }
+        "--cv-precision" => {
+            parsed.cv_precision = Some(parse_u32_flag("--cv-precision", args, index)?);
         }
         _ => return Ok(false),
     }
@@ -424,6 +446,15 @@ fn parse_f64_flag(flag: &str, args: &[String], index: &mut usize) -> Result<f64,
 fn parse_f64_value(flag: &str, value: &str) -> Result<f64, CliError> {
     value.parse::<f64>().map_err(|error| {
         CliError::config(format!("{flag} expects a float, got `{value}`: {error}"))
+    })
+}
+
+fn parse_u32_flag(flag: &str, args: &[String], index: &mut usize) -> Result<u32, CliError> {
+    let value = next_value(flag, args, index)?;
+    value.parse::<u32>().map_err(|error| {
+        CliError::config(format!(
+            "{flag} expects a non-negative integer, got `{value}`: {error}"
+        ))
     })
 }
 
@@ -480,6 +511,8 @@ struct CommonArgs {
     state_path: Option<PathBuf>,
     name: Option<String>,
     reset_accumulator: bool,
+    scale: Option<f64>,
+    cv_precision: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -492,6 +525,8 @@ struct OnceArgs {
     state_path: Option<PathBuf>,
     name: Option<String>,
     reset_accumulator: bool,
+    scale: f64,
+    cv_precision: usize,
 }
 
 impl OnceArgs {
@@ -512,6 +547,8 @@ struct PipeArgs {
     state_path: Option<PathBuf>,
     name: Option<String>,
     reset_accumulator: bool,
+    scale: f64,
+    cv_precision: usize,
 }
 
 impl PipeArgs {

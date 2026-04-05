@@ -143,7 +143,11 @@ impl ControllerSession {
             last_cv: Some(confirmed_applied_cv),
             last_pv: self.controller.last_pv(),
             iter: self.snapshot.iter.saturating_add(1),
-            created_at: self.snapshot.created_at.clone().or_else(|| Some(now_iso8601())),
+            created_at: self
+                .snapshot
+                .created_at
+                .clone()
+                .or_else(|| Some(now_iso8601())),
             updated_at: Some(now_iso8601()),
         }
     }
