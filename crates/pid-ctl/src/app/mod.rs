@@ -118,6 +118,22 @@ impl ControllerSession {
         })
     }
 
+    /// Marks a skipped tick (anomalous `dt`): derivative is unreliable on the next successful step.
+    /// Updates `updated_at` and persists when `--state` is set; does **not** advance `iter`.
+    pub fn on_dt_skipped(&mut self) -> Option<StateStoreError> {
+        self.controller.mark_dt_skipped();
+        self.snapshot.updated_at = Some(now_iso8601());
+        self.persist_snapshot().err()
+    }
+
+    /// Records a CV value confirmed written to the actuator without advancing `iter`
+    /// (e.g. `--safe-cv` after PV loss).
+    pub fn record_confirmed_cv(&mut self, cv: f64) -> Option<StateStoreError> {
+        self.snapshot.last_cv = Some(cv);
+        self.snapshot.updated_at = Some(now_iso8601());
+        self.persist_snapshot().err()
+    }
+
     fn build_snapshot(&self, step: &StepResult, confirmed_applied_cv: f64) -> StateSnapshot {
         StateSnapshot {
             schema_version: STATE_SCHEMA_VERSION,

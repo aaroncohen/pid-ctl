@@ -157,7 +157,7 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
     loop {
         // Check shutdown flag at top of each iteration.
         if shutdown.load(Ordering::Relaxed) {
-            write_safe_cv(args.safe_cv, cv_sink.as_mut());
+            write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
             break;
         }
 
@@ -169,7 +169,7 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
 
         // Check shutdown again after sleeping (signal may have arrived during sleep).
         if shutdown.load(Ordering::Relaxed) {
-            write_safe_cv(args.safe_cv, cv_sink.as_mut());
+            write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
             break;
         }
 
@@ -196,6 +196,9 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
                 "dt {dt:.6}s below min_dt {:.6}s — skipping tick",
                 args.min_dt
             );
+            if let Some(err) = session.on_dt_skipped() {
+                eprintln!("state write failed: {err}");
+            }
             continue;
         }
         if dt > args.max_dt {
@@ -203,6 +206,9 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
                 "dt {dt:.6}s exceeds max_dt {:.6}s — skipping tick",
                 args.max_dt
             );
+            if let Some(err) = session.on_dt_skipped() {
+                eprintln!("state write failed: {err}");
+            }
             continue;
         }
 
@@ -211,7 +217,7 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
             Ok(pv) => pv,
             Err(error) => {
                 eprintln!("PV read failed: {error}");
-                write_safe_cv(args.safe_cv, cv_sink.as_mut());
+                write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
                 continue;
             }
         };
@@ -269,7 +275,7 @@ fn run_loop_tick(
             let limit = args.cv_fail_after;
             eprintln!("CV write failed ({cv_fail_count}/{limit}): {error}");
             if *cv_fail_count >= limit {
-                write_safe_cv(args.safe_cv, cv_sink);
+                write_safe_cv(args.safe_cv, cv_sink, session);
                 return Err(CliError::new(
                     2,
                     format!("exiting after {cv_fail_count} consecutive CV write failures"),
@@ -281,10 +287,13 @@ fn run_loop_tick(
     Ok(())
 }
 
-/// Writes the safe-cv value to the sink if one is configured.
-fn write_safe_cv(safe_cv: Option<f64>, cv_sink: &mut dyn CvSink) {
-    if let Some(cv) = safe_cv {
-        let _ = cv_sink.write_cv(cv);
+/// Writes the safe CV when configured; on success, records it as the last confirmed-applied CV.
+fn write_safe_cv(safe_cv: Option<f64>, cv_sink: &mut dyn CvSink, session: &mut ControllerSession) {
+    if let Some(cv) = safe_cv
+        && cv_sink.write_cv(cv).is_ok()
+        && let Some(err) = session.record_confirmed_cv(cv)
+    {
+        eprintln!("state write failed: {err}");
     }
 }
 

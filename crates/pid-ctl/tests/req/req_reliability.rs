@@ -1,6 +1,7 @@
 //! Reliability & Operational Safety — `pid-ctl_plan.md` (numbered principles).
 
 use assert_cmd::Command;
+use pid_ctl::app::StateStore;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -107,4 +108,93 @@ fn cv_write_failure_policy_matches_mode_once_loop_pipe() {
     cmd.timeout(Duration::from_secs(5));
 
     cmd.assert().code(2);
+}
+
+/// Beads pid-ctl-8vb.17: anomalous `dt` skips advance `updated_at` and persist `mark_dt_skipped`
+/// semantics without advancing `iter`.
+#[test]
+fn loop_dt_skip_updates_state_timestamp_without_advancing_iter() {
+    let dir = tempdir().expect("temporary directory");
+    let pv_path = dir.path().join("pv.txt");
+    let state_path = dir.path().join("state.json");
+    std::fs::write(&pv_path, "50.0\n").expect("write pv file");
+    std::fs::write(&state_path, r#"{"schema_version":1,"iter":7,"i_acc":0.0}"#)
+        .expect("seed state");
+
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args(["loop", "--pv-file"]);
+    cmd.arg(&pv_path);
+    cmd.args([
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--interval",
+        "50ms",
+        "--min-dt",
+        "1e9",
+        "--cv-file",
+        "/dev/null",
+        "--state",
+    ]);
+    cmd.arg(&state_path);
+
+    cmd.timeout(Duration::from_millis(400));
+    let output = cmd.output().expect("run loop");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("skipping tick") && stderr.contains("min_dt"),
+        "expected dt skip stderr; got: {stderr:?}"
+    );
+
+    let store = StateStore::new(&state_path);
+    let snapshot = store
+        .load()
+        .expect("state loaded")
+        .expect("snapshot present");
+    assert_eq!(
+        snapshot.iter, 7,
+        "iter must not advance when every tick is an out-of-range dt skip"
+    );
+    assert!(
+        snapshot.updated_at.is_some(),
+        "updated_at should be set after dt skips with --state"
+    );
+}
+
+/// Beads pid-ctl-8vb.18 / plan §17: after PV failure, a successful `--safe-cv` write updates
+/// persisted `last_cv` to the confirmed safe value.
+#[test]
+fn loop_pv_failure_safe_cv_updates_last_cv_in_state() {
+    let dir = tempdir().expect("temporary directory");
+    let state_path = dir.path().join("ctrl.json");
+    let cv_path = dir.path().join("cv.txt");
+
+    std::fs::write(
+        &state_path,
+        r#"{"schema_version":1,"last_cv":5.0,"iter":2,"i_acc":0.0}"#,
+    )
+    .expect("seed state");
+
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args(["loop", "--pv-cmd", "false"]);
+    cmd.args(["--setpoint", "55.0", "--kp", "1.0"]);
+    cmd.args(["--interval", "50ms"]);
+    cmd.args(["--cv-file"]);
+    cmd.arg(&cv_path);
+    cmd.args(["--safe-cv", "12.34"]);
+    cmd.arg("--state");
+    cmd.arg(&state_path);
+
+    cmd.timeout(Duration::from_millis(500));
+    let _ = cmd.output();
+
+    let store = StateStore::new(&state_path);
+    let snapshot = store
+        .load()
+        .expect("state loaded")
+        .expect("snapshot present");
+    assert_eq!(snapshot.last_cv, Some(12.34));
+    assert_eq!(snapshot.iter, 2, "PV failure path must not advance iter");
 }
