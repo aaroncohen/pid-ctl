@@ -41,6 +41,7 @@ pub struct PidConfig {
     pub pv_filter_alpha: f64,
     pub anti_windup: AntiWindupStrategy,
     pub anti_windup_tt: Option<f64>,
+    pub tt_upper_bound: Option<f64>,
 }
 
 impl Default for PidConfig {
@@ -58,6 +59,7 @@ impl Default for PidConfig {
             pv_filter_alpha: 0.0,
             anti_windup: AntiWindupStrategy::BackCalculation,
             anti_windup_tt: None,
+            tt_upper_bound: None,
         }
     }
 }
@@ -100,6 +102,12 @@ impl PidConfig {
             return Err(ConfigError::NegativeDeadband {
                 deadband: self.deadband,
             });
+        }
+
+        if let Some(bound) = self.tt_upper_bound
+            && bound <= 0.0
+        {
+            return Err(ConfigError::NonPositiveTtUpperBound { bound });
         }
 
         Ok(())
@@ -361,7 +369,7 @@ impl PidController {
             self.config.kp / self.config.ki
         };
 
-        auto_tt.clamp(dt, 100.0)
+        auto_tt.clamp(dt, self.config.tt_upper_bound.unwrap_or(100.0))
     }
 
     fn apply_slew_rate(&self, clamped_cv: f64, prev_applied_cv: f64, dt: f64) -> f64 {
@@ -384,6 +392,7 @@ pub enum ConfigError {
     NegativeSetpointRampRate { rate: f64 },
     NegativeSlewRate { rate: f64 },
     NegativeDeadband { deadband: f64 },
+    NonPositiveTtUpperBound { bound: f64 },
 }
 
 impl fmt::Display for ConfigError {
@@ -406,6 +415,9 @@ impl fmt::Display for ConfigError {
             }
             Self::NegativeDeadband { deadband } => {
                 write!(f, "deadband must be non-negative, got {deadband}")
+            }
+            Self::NonPositiveTtUpperBound { bound } => {
+                write!(f, "tt_upper_bound must be positive, got {bound}")
             }
         }
     }
