@@ -10,8 +10,12 @@
 
 #[path = "req/helpers.rs"]
 mod helpers;
+#[path = "req/req_cv_sink.rs"]
+mod req_cv_sink;
 #[path = "req/req_cv_write_policy.rs"]
 mod req_cv_write_policy;
+#[path = "req/req_dry_run.rs"]
+mod req_dry_run;
 #[path = "req/req_flag_precedence.rs"]
 mod req_flag_precedence;
 #[path = "req/req_flag_validation.rs"]
@@ -24,6 +28,8 @@ mod req_loop;
 mod req_once_pipe;
 #[path = "req/req_pv_source.rs"]
 mod req_pv_source;
+#[path = "req/req_pv_stdin_verify_cv.rs"]
+mod req_pv_stdin_verify_cv;
 #[path = "req/req_reliability.rs"]
 mod req_reliability;
 #[path = "req/req_state_commands.rs"]

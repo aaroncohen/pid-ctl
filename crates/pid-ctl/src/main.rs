@@ -1,4 +1,7 @@
-use pid_ctl::adapters::{CmdPvSource, CvSink, FileCvSink, FilePvSource, PvSource, StdoutCvSink};
+use pid_ctl::adapters::{
+    CmdCvSink, CmdPvSource, CvSink, DryRunCvSink, FileCvSink, FilePvSource, PvSource,
+    StdinPvSource, StdoutCvSink,
+};
 use pid_ctl::app::{self, ControllerSession, SessionConfig, StateSnapshot, StateStore};
 use pid_ctl::json_events;
 use pid_ctl::schedule::next_deadline_after_tick;
@@ -66,7 +69,17 @@ fn run(args: &[String]) -> Result<(), CliError> {
 fn run_once(args: &OnceArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
-    let mut sink = build_cv_sink(&args.cv_sink, args.cv_precision);
+    let mut sink: Box<dyn CvSink> = if args.dry_run {
+        Box::new(DryRunCvSink)
+    } else {
+        build_cv_sink(
+            args.cv_sink
+                .as_ref()
+                .expect("cv_sink required when not dry_run"),
+            args.cv_precision,
+            args.cmd_timeout,
+        )
+    };
     let mut log_file = open_log_optional(args.log_path.as_deref())?;
 
     let dt = resolve_once_dt(&session, args, &mut log_file);
@@ -162,8 +175,18 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
 fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
-    let mut pv_source = build_pv_source(&args.pv_source, args.cmd_timeout);
-    let mut cv_sink = build_cv_sink(&args.cv_sink, args.cv_precision);
+    let mut pv_source = build_pv_source(&args.pv_source, args.cmd_timeout, args.pv_stdin_timeout);
+    let mut cv_sink: Box<dyn CvSink> = if args.dry_run {
+        Box::new(DryRunCvSink)
+    } else {
+        build_cv_sink(
+            args.cv_sink
+                .as_ref()
+                .expect("cv_sink required when not dry_run"),
+            args.cv_precision,
+            args.cmd_timeout,
+        )
+    };
 
     let mut log_file = open_log_optional(args.log_path.as_deref())?;
 
@@ -458,13 +481,22 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         ));
     }
 
-    let pv_source = common
-        .pv_source
-        .ok_or_else(|| CliError::config("loop requires a PV source (--pv-file or --pv-cmd)"))?;
+    let pv_source = common.pv_source.ok_or_else(|| {
+        CliError::config("loop requires a PV source (--pv-file, --pv-cmd, or --pv-stdin)")
+    })?;
 
-    let cv_sink = common
-        .cv_sink
-        .ok_or_else(|| CliError::config("loop requires a CV sink (--cv-file or --cv-stdout)"))?;
+    // CV sink is required unless --dry-run is active.
+    if common.cv_sink.is_none() && !common.dry_run {
+        return Err(CliError::config(
+            "loop requires a CV sink (--cv-file, --cv-cmd, or --cv-stdout)",
+        ));
+    }
+
+    let mut cv_sink = common.cv_sink;
+    if let Some(ref mut sink) = cv_sink {
+        apply_cv_cmd_timeout(sink, common.cv_cmd_timeout);
+        apply_verify_cv(sink, common.verify_cv);
+    }
 
     let interval = common
         .loop_interval
@@ -477,6 +509,8 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
     let max_dt_default = (interval_secs * 3.0).min(60.0);
     // Ensure max_dt_default is never below min_dt default (0.01).
     let max_dt_default = max_dt_default.max(0.01);
+
+    let pv_stdin_timeout = common.pv_stdin_timeout.unwrap_or(interval);
 
     Ok(LoopArgs {
         interval,
@@ -496,14 +530,36 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         max_dt: common.max_dt.unwrap_or(max_dt_default),
         dt_clamp: common.dt_clamp,
         log_path: common.log_path,
+        dry_run: common.dry_run,
+        pv_stdin_timeout,
+        verify_cv: common.verify_cv,
     })
 }
 
-fn build_pv_source(source: &PvSourceConfig, cmd_timeout: Duration) -> Box<dyn PvSource> {
+/// If `timeout` is `Some`, sets it on the `Cmd` variant.
+fn apply_cv_cmd_timeout(cv_sink: &mut CvSinkConfig, timeout: Option<Duration>) {
+    if let (Some(t), CvSinkConfig::Cmd { timeout: slot, .. }) = (timeout, cv_sink) {
+        *slot = Some(t);
+    }
+}
+
+/// Sets the verify flag on `File` variant sinks.
+fn apply_verify_cv(cv_sink: &mut CvSinkConfig, verify: bool) {
+    if let CvSinkConfig::File { verify: slot, .. } = cv_sink {
+        *slot = verify;
+    }
+}
+
+fn build_pv_source(
+    source: &PvSourceConfig,
+    cmd_timeout: Duration,
+    pv_stdin_timeout: Duration,
+) -> Box<dyn PvSource> {
     match source {
         PvSourceConfig::Literal(_) => unreachable!("loop rejects literal PV"),
         PvSourceConfig::File(path) => Box::new(FilePvSource::new(path.clone())),
         PvSourceConfig::Cmd(cmd) => Box::new(CmdPvSource::new(cmd.clone(), cmd_timeout)),
+        PvSourceConfig::Stdin => Box::new(StdinPvSource::new(pv_stdin_timeout)),
     }
 }
 
@@ -644,13 +700,26 @@ fn parse_state_flag(args: &[String], command: &str) -> Result<PathBuf, CliError>
     Err(CliError::config(format!("{command} requires --state")))
 }
 
-fn build_cv_sink(cv_sink: &CvSinkConfig, precision: usize) -> Box<dyn CvSink> {
+fn build_cv_sink(
+    cv_sink: &CvSinkConfig,
+    precision: usize,
+    default_cmd_timeout: Duration,
+) -> Box<dyn CvSink> {
     match cv_sink {
         CvSinkConfig::Stdout => Box::new(StdoutCvSink { precision }),
-        CvSinkConfig::File(path) => {
+        CvSinkConfig::File { path, verify } => {
             let mut sink = FileCvSink::new(path.clone());
             sink.precision = precision;
+            sink.verify = *verify;
             Box::new(sink)
+        }
+        CvSinkConfig::Cmd { command, timeout } => {
+            let effective_timeout = timeout.unwrap_or(default_cmd_timeout);
+            Box::new(CmdCvSink::new(
+                command.clone(),
+                effective_timeout,
+                precision,
+            ))
         }
     }
 }
@@ -670,11 +739,16 @@ fn parse_once(args: &[String]) -> Result<OnceArgs, CliError> {
             "once requires a PV source: --pv <float>, --pv-file <path>, or --pv-cmd <cmd>",
         )
     })?;
-    let cv_sink = common.cv_sink.ok_or_else(|| {
-        CliError::config("once requires exactly one CV sink: --cv-stdout or --cv-file <path>")
-    })?;
 
-    if matches!(common.output_format, OutputFormat::Json) && matches!(cv_sink, CvSinkConfig::Stdout)
+    // CV sink is required unless --dry-run is active.
+    if common.cv_sink.is_none() && !common.dry_run {
+        return Err(CliError::config(
+            "once requires exactly one CV sink: --cv-stdout or --cv-file <path>",
+        ));
+    }
+
+    if matches!(common.output_format, OutputFormat::Json)
+        && matches!(common.cv_sink, Some(CvSinkConfig::Stdout))
     {
         return Err(CliError::config(
             "--format json writes to stdout, which conflicts with --cv-stdout — use --log for machine-readable telemetry",
@@ -682,6 +756,12 @@ fn parse_once(args: &[String]) -> Result<OnceArgs, CliError> {
     }
 
     let pid_config = resolve_pid_config(&common.pid_flags, common.state_path.as_deref())?;
+
+    let mut cv_sink = common.cv_sink;
+    if let Some(ref mut sink) = cv_sink {
+        apply_cv_cmd_timeout(sink, common.cv_cmd_timeout);
+        apply_verify_cv(sink, common.verify_cv);
+    }
 
     Ok(OnceArgs {
         pv_source,
@@ -699,6 +779,7 @@ fn parse_once(args: &[String]) -> Result<OnceArgs, CliError> {
         scale: common.scale.unwrap_or(1.0),
         cv_precision: common.cv_precision.unwrap_or(2) as usize,
         log_path: common.log_path,
+        dry_run: common.dry_run,
     })
 }
 
@@ -846,6 +927,10 @@ fn parse_common_args(args: &[String], command_kind: CommandKind) -> Result<Commo
                 let secs = parse_f64_flag("--cmd-timeout", args, &mut index)?;
                 parsed.cmd_timeout = Some(Duration::from_secs_f64(secs));
             }
+            "--cv-cmd-timeout" => {
+                let secs = parse_f64_flag("--cv-cmd-timeout", args, &mut index)?;
+                parsed.cv_cmd_timeout = Some(Duration::from_secs_f64(secs));
+            }
             "--dry-run" => {
                 if matches!(command_kind, CommandKind::Pipe) {
                     return Err(CliError::config(
@@ -853,9 +938,7 @@ fn parse_common_args(args: &[String], command_kind: CommandKind) -> Result<Commo
                     ));
                 }
 
-                return Err(CliError::config(
-                    "--dry-run is not implemented yet in this slice",
-                ));
+                parsed.dry_run = true;
             }
             unknown if unknown.starts_with("--") => {
                 return Err(CliError::config(format!("unrecognized option `{unknown}`")));
@@ -997,15 +1080,32 @@ fn handle_cv_option(
                 return Err(pipe_err());
             }
             let path = parse_path_flag("--cv-file", args, index)?;
-            set_cv_sink(&mut parsed.cv_sink, CvSinkConfig::File(path))?;
+            set_cv_sink(
+                &mut parsed.cv_sink,
+                CvSinkConfig::File {
+                    path,
+                    verify: false,
+                },
+            )?;
         }
         "--cv-cmd" => {
             if matches!(command_kind, CommandKind::Pipe) {
                 return Err(pipe_err());
             }
-            return Err(CliError::config(
-                "--cv-cmd is not implemented yet in this slice",
-            ));
+            let cmd = parse_string_flag("--cv-cmd", args, index)?;
+            set_cv_sink(
+                &mut parsed.cv_sink,
+                CvSinkConfig::Cmd {
+                    command: cmd,
+                    timeout: None,
+                },
+            )?;
+        }
+        "--verify-cv" => {
+            if matches!(command_kind, CommandKind::Pipe) {
+                return Err(pipe_err());
+            }
+            parsed.verify_cv = true;
         }
         _ => return Ok(false),
     }
@@ -1057,9 +1157,24 @@ fn handle_pv_option(
             if matches!(command_kind, CommandKind::Pipe) {
                 return Err(pipe_err());
             }
-            return Err(CliError::config(
-                "--pv-stdin is not implemented yet in this slice",
-            ));
+            if matches!(command_kind, CommandKind::Once) {
+                return Err(CliError::config(
+                    "--pv-stdin is only supported with loop — use pipe for externally-timed stdin reads",
+                ));
+            }
+            set_pv_source(&mut parsed.pv_source, PvSourceConfig::Stdin)?;
+        }
+        "--pv-stdin-timeout" => {
+            if matches!(command_kind, CommandKind::Pipe) {
+                return Err(pipe_err());
+            }
+            if matches!(command_kind, CommandKind::Once) {
+                return Err(CliError::config(
+                    "--pv-stdin-timeout is only supported with loop",
+                ));
+            }
+            let value = next_value("--pv-stdin-timeout", args, index)?;
+            parsed.pv_stdin_timeout = Some(parse_duration_flag("--pv-stdin-timeout", &value)?);
         }
         _ => return Ok(false),
     }
@@ -1092,6 +1207,7 @@ fn resolve_pv(source: &PvSourceConfig, cmd_timeout: Duration) -> io::Result<f64>
         PvSourceConfig::Literal(v) => Ok(*v),
         PvSourceConfig::File(path) => FilePvSource::new(path.clone()).read_pv(),
         PvSourceConfig::Cmd(cmd) => CmdPvSource::new(cmd.clone(), cmd_timeout).read_pv(),
+        PvSourceConfig::Stdin => unreachable!("--pv-stdin is only valid for loop, not once"),
     }
 }
 
@@ -1171,6 +1287,7 @@ struct PidFlags {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 struct CommonArgs {
     pv_source: Option<PvSourceConfig>,
     pid_flags: PidFlags,
@@ -1187,12 +1304,16 @@ struct CommonArgs {
     scale: Option<f64>,
     cv_precision: Option<u32>,
     cmd_timeout: Option<Duration>,
+    cv_cmd_timeout: Option<Duration>,
     loop_interval: Option<Duration>,
     safe_cv: Option<f64>,
     cv_fail_after: Option<u32>,
     min_dt: Option<f64>,
     max_dt: Option<f64>,
     log_path: Option<PathBuf>,
+    dry_run: bool,
+    pv_stdin_timeout: Option<Duration>,
+    verify_cv: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1204,7 +1325,7 @@ struct OnceArgs {
     min_dt: f64,
     max_dt: f64,
     output_format: OutputFormat,
-    cv_sink: CvSinkConfig,
+    cv_sink: Option<CvSinkConfig>,
     pid_config: PidConfig,
     state_path: Option<PathBuf>,
     name: Option<String>,
@@ -1212,6 +1333,7 @@ struct OnceArgs {
     scale: f64,
     cv_precision: usize,
     log_path: Option<PathBuf>,
+    dry_run: bool,
 }
 
 /// Which PV source was specified on the CLI.
@@ -1220,6 +1342,8 @@ enum PvSourceConfig {
     Literal(f64),
     File(PathBuf),
     Cmd(String),
+    /// `loop --pv-stdin`: one line per tick, with a per-tick timeout.
+    Stdin,
 }
 
 impl OnceArgs {
@@ -1257,10 +1381,11 @@ impl PipeArgs {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 struct LoopArgs {
     interval: Duration,
     pv_source: PvSourceConfig,
-    cv_sink: CvSinkConfig,
+    cv_sink: Option<CvSinkConfig>,
     pid_config: PidConfig,
     state_path: Option<PathBuf>,
     name: Option<String>,
@@ -1275,6 +1400,9 @@ struct LoopArgs {
     max_dt: f64,
     dt_clamp: bool,
     log_path: Option<PathBuf>,
+    dry_run: bool,
+    pv_stdin_timeout: Duration,
+    verify_cv: bool,
 }
 
 impl LoopArgs {
@@ -1291,7 +1419,14 @@ impl LoopArgs {
 #[derive(Clone, Debug, PartialEq)]
 enum CvSinkConfig {
     Stdout,
-    File(PathBuf),
+    File {
+        path: PathBuf,
+        verify: bool,
+    },
+    Cmd {
+        command: String,
+        timeout: Option<Duration>,
+    },
 }
 
 #[derive(Debug)]
