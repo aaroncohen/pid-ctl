@@ -44,6 +44,8 @@ mod req_state_write_interval;
 mod req_stdout_contract;
 #[path = "req/req_tune.rs"]
 mod req_tune;
+#[path = "req/req_tune_pty.rs"]
+mod req_tune_pty;
 
 #[test]
 fn harness_smoke() {

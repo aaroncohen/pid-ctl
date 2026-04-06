@@ -21,6 +21,7 @@ tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 pretty_assertions.workspace = true
+portable-pty.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"
