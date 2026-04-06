@@ -176,21 +176,21 @@ impl PidController {
     }
 
     #[must_use]
-    pub fn config(&self) -> &PidConfig {
+    pub const fn config(&self) -> &PidConfig {
         &self.config
     }
 
-    pub fn set_gains(&mut self, kp: f64, ki: f64, kd: f64) {
+    pub const fn set_gains(&mut self, kp: f64, ki: f64, kd: f64) {
         self.config.kp = kp;
         self.config.ki = ki;
         self.config.kd = kd;
     }
 
-    pub fn set_setpoint(&mut self, setpoint: f64) {
+    pub const fn set_setpoint(&mut self, setpoint: f64) {
         self.config.setpoint = setpoint;
     }
 
-    pub fn restore_state(&mut self, state: &PidRuntimeState) {
+    pub const fn restore_state(&mut self, state: &PidRuntimeState) {
         self.i_acc = state.i_acc;
         self.last_pv = state.last_pv;
         self.last_error = state.last_error;
@@ -198,11 +198,11 @@ impl PidController {
         self.effective_sp = state.effective_sp;
     }
 
-    pub fn mark_dt_skipped(&mut self) {
+    pub const fn mark_dt_skipped(&mut self) {
         self.next_d_term_skip_reason = Some(DTermSkipReason::PostDtSkip);
     }
 
-    pub fn reset_integral(&mut self) {
+    pub const fn reset_integral(&mut self) {
         self.i_acc = 0.0;
         self.next_d_term_skip_reason = Some(DTermSkipReason::PostReset);
     }
@@ -258,27 +258,27 @@ impl PidController {
     }
 
     #[must_use]
-    pub fn i_acc(&self) -> f64 {
+    pub const fn i_acc(&self) -> f64 {
         self.i_acc
     }
 
     #[must_use]
-    pub fn last_pv(&self) -> Option<f64> {
+    pub const fn last_pv(&self) -> Option<f64> {
         self.last_pv
     }
 
     #[must_use]
-    pub fn last_error(&self) -> Option<f64> {
+    pub const fn last_error(&self) -> Option<f64> {
         self.last_error
     }
 
     #[must_use]
-    pub fn last_cv(&self) -> Option<f64> {
+    pub const fn last_cv(&self) -> Option<f64> {
         self.last_cv
     }
 
     #[must_use]
-    pub fn effective_sp(&self) -> Option<f64> {
+    pub const fn effective_sp(&self) -> Option<f64> {
         self.effective_sp
     }
 
@@ -286,7 +286,8 @@ impl PidController {
         if self.config.pv_filter_alpha == 0.0 {
             raw_pv
         } else if let Some(prev_pv) = self.last_pv {
-            ((1.0 - self.config.pv_filter_alpha) * raw_pv) + (self.config.pv_filter_alpha * prev_pv)
+            (1.0 - self.config.pv_filter_alpha)
+                .mul_add(raw_pv, self.config.pv_filter_alpha * prev_pv)
         } else {
             raw_pv
         }
@@ -349,7 +350,7 @@ impl PidController {
 
                 let tt = self.anti_windup_tt(dt);
                 let corrected_i_term =
-                    candidate_i_term + ((prev_applied_cv - candidate_u_unclamped) * (dt / tt));
+                    (prev_applied_cv - candidate_u_unclamped).mul_add(dt / tt, candidate_i_term);
 
                 (corrected_i_term / self.config.ki, corrected_i_term)
             }
@@ -427,7 +428,7 @@ impl Error for ConfigError {}
 
 // TODO: consider replacing with f64::clamp — functionally equivalent here since
 // inputs are validated, but std's version is more idiomatic.
-fn clamp(value: f64, min: f64, max: f64) -> f64 {
+const fn clamp(value: f64, min: f64, max: f64) -> f64 {
     value.max(min).min(max)
 }
 

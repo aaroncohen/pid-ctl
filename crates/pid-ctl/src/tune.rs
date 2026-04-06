@@ -59,14 +59,14 @@ enum GainFocus {
 
 /// Sparkline gain-change annotation: merges within 3 ticks; `marker_tick` selects the `|` column.
 #[derive(Clone, Debug)]
-pub(crate) struct GainAnnotation {
+struct GainAnnotation {
     /// Tick column for the `|` marker (latest tick in the merge group).
     marker_tick: u64,
     text: String,
 }
 
 impl GainFocus {
-    fn next(self) -> Self {
+    const fn next(self) -> Self {
         match self {
             Self::Kp => Self::Ki,
             Self::Ki => Self::Kd,
@@ -75,7 +75,7 @@ impl GainFocus {
         }
     }
 
-    fn prev(self) -> Self {
+    const fn prev(self) -> Self {
         match self {
             Self::Kp => Self::Sp,
             Self::Ki => Self::Kp,
@@ -84,7 +84,7 @@ impl GainFocus {
         }
     }
 
-    fn idx(self) -> usize {
+    const fn idx(self) -> usize {
         match self {
             Self::Kp => 0,
             Self::Ki => 1,
@@ -199,7 +199,7 @@ impl TuneUiState {
 }
 
 /// Runs the interactive tuning dashboard until the operator quits or a fatal loop error occurs.
-pub(crate) fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
+pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|e| CliError::config(e.to_string()))?;
     let cfg0 = session.config().clone();
@@ -548,7 +548,7 @@ fn is_export_tunable_flag(s: &str) -> bool {
     matches!(s, "--setpoint" | "--kp" | "--ki" | "--kd" | "--interval")
 }
 
-pub(crate) fn build_export_line(full_argv: &[String], args: &LoopArgs) -> String {
+fn build_export_line(full_argv: &[String], args: &LoopArgs) -> String {
     let c = &args.pid_config;
     build_export_line_values(full_argv, c.setpoint, c.kp, c.ki, c.kd, args.interval)
 }
@@ -1043,7 +1043,7 @@ fn step_cell_for_row(focus: GainFocus, row: usize, step: &[f64; 4]) -> String {
     }
 }
 
-pub(crate) fn pv_history_trend(pv: &VecDeque<f64>) -> &'static str {
+fn pv_history_trend(pv: &VecDeque<f64>) -> &'static str {
     if pv.len() < 2 {
         return "";
     }

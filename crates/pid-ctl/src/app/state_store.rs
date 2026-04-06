@@ -92,7 +92,7 @@ impl StateSnapshot {
         serde_json::to_string_pretty(self).map_err(StateStoreError::Json)
     }
 
-    fn validate(&self) -> Result<(), StateStoreError> {
+    const fn validate(&self) -> Result<(), StateStoreError> {
         if self.schema_version > STATE_SCHEMA_VERSION {
             return Err(StateStoreError::UnsupportedSchemaVersion {
                 found: self.schema_version,
@@ -104,7 +104,7 @@ impl StateSnapshot {
     }
 
     #[must_use]
-    pub fn runtime_state(&self) -> PidRuntimeState {
+    pub const fn runtime_state(&self) -> PidRuntimeState {
         PidRuntimeState {
             i_acc: self.i_acc,
             last_pv: self.last_pv,
@@ -322,6 +322,6 @@ impl Error for StateStoreError {
     }
 }
 
-fn default_schema_version() -> u64 {
+const fn default_schema_version() -> u64 {
     STATE_SCHEMA_VERSION
 }

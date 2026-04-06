@@ -6,6 +6,10 @@ resolver = "3"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
+repository = "https://github.com/cohena/pid-ctl"
+readme = "README.md"
+keywords = ["pid", "control", "cli", "automation", "industrial"]
+categories = ["command-line-utilities", "science::robotics"]
 
 [workspace.dependencies]
 # Shared versions — bump intentionally; see crates.io for latest.

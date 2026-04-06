@@ -444,10 +444,11 @@ fn resolve_once_dt(
     if args.state_path.is_none() {
         return args.dt;
     }
-    match session.wall_clock_dt_since_state_update() {
-        Some(raw) => clamp_once_wall_clock_dt(raw, args.min_dt, args.max_dt, log),
-        None => args.dt,
-    }
+    session
+        .wall_clock_dt_since_state_update()
+        .map_or(args.dt, |raw| {
+            clamp_once_wall_clock_dt(raw, args.min_dt, args.max_dt, log)
+        })
 }
 
 fn clamp_once_wall_clock_dt(
@@ -650,14 +651,14 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
 }
 
 /// If `timeout` is `Some`, sets it on the `Cmd` variant.
-fn apply_cv_cmd_timeout(cv_sink: &mut CvSinkConfig, timeout: Option<Duration>) {
+const fn apply_cv_cmd_timeout(cv_sink: &mut CvSinkConfig, timeout: Option<Duration>) {
     if let (Some(t), CvSinkConfig::Cmd { timeout: slot, .. }) = (timeout, cv_sink) {
         *slot = Some(t);
     }
 }
 
 /// Sets the verify flag on `File` variant sinks.
-fn apply_verify_cv(cv_sink: &mut CvSinkConfig, verify: bool) {
+const fn apply_verify_cv(cv_sink: &mut CvSinkConfig, verify: bool) {
     if let CvSinkConfig::File { verify: slot, .. } = cv_sink {
         *slot = verify;
     }

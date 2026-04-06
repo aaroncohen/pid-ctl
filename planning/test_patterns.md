@@ -47,3 +47,4 @@ Versions are centralized in the root `Cargo.toml` `[workspace.dependencies]`; bu
 - **Sparkline `|` markers:** `spark_marker_row` is unit-tested against a synthetic serial window + `GainAnnotation` (column alignment).
 - **PV trend label:** `pv_history_trend` (first vs last sample in the deque) is unit-tested for the “trending ▲” case.
 - **`once --log`:** Successful ticks append one iteration NDJSON line (same shape as `loop`); `state_write_failed` also emits a structured `state_write_failed` event before exit 4 when `--state` is set.
+- **Clippy `redundant_clone` vs two `..base` updates:** When a test builds two `PidConfig { .. }` values from the same `base` without `Copy`, exactly one `.clone()` is required. `clippy::redundant_clone` may still fire on that clone; suppress with a targeted `#[allow(clippy::redundant_clone)]` on the test and a one-line rationale (prefer this over `PidConfig: Copy`, which would force broad `clone_on_copy` cleanups across tests).

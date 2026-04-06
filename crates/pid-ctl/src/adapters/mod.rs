@@ -169,7 +169,7 @@ pub struct CmdPvSource {
 impl CmdPvSource {
     /// Creates a new [`CmdPvSource`].
     #[must_use]
-    pub fn new(command: String, timeout: Duration) -> Self {
+    pub const fn new(command: String, timeout: Duration) -> Self {
         Self { command, timeout }
     }
 }
@@ -182,6 +182,7 @@ fn join_stdout_reader(handle: thread::JoinHandle<io::Result<String>>) -> io::Res
 
 /// Best-effort: terminate the whole process group (Unix) so `sh -c` children
 /// cannot outlive the timeout. Falls back to [`Child::kill`] on other targets.
+#[cfg_attr(unix, allow(clippy::needless_pass_by_ref_mut))] // Unix only needs `Child::id` (`&self`); non-Unix needs `&mut` for `kill`.
 fn kill_child_process_tree(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -280,7 +281,7 @@ pub struct StdinPvSource {
 impl StdinPvSource {
     /// Creates a new [`StdinPvSource`] that blocks for at most `timeout` per read.
     #[must_use]
-    pub fn new(timeout: Duration) -> Self {
+    pub const fn new(timeout: Duration) -> Self {
         Self { timeout }
     }
 }
@@ -348,10 +349,13 @@ pub struct CmdCvSink {
     pub precision: usize,
 }
 
+const CV_URL_PLACEHOLDER: &str = "{cv:url}";
+const CV_PLACEHOLDER: &str = "{cv}";
+
 impl CmdCvSink {
     /// Creates a new [`CmdCvSink`].
     #[must_use]
-    pub fn new(command_template: String, timeout: Duration, precision: usize) -> Self {
+    pub const fn new(command_template: String, timeout: Duration, precision: usize) -> Self {
         Self {
             command_template,
             timeout,
@@ -363,8 +367,8 @@ impl CmdCvSink {
         let cv_str = format!("{cv:.prec$}", prec = self.precision);
         let cv_url = percent_encode(&cv_str);
         self.command_template
-            .replace("{cv:url}", &cv_url)
-            .replace("{cv}", &cv_str)
+            .replace(CV_URL_PLACEHOLDER, &cv_url)
+            .replace(CV_PLACEHOLDER, &cv_str)
     }
 }
 

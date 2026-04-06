@@ -113,13 +113,13 @@ impl ControllerSession {
     }
 
     #[must_use]
-    pub fn config(&self) -> &PidConfig {
+    pub const fn config(&self) -> &PidConfig {
         self.controller.config()
     }
 
     /// Last CV confirmed applied to the actuator (from the persisted snapshot).
     #[must_use]
-    pub fn last_applied_cv(&self) -> Option<f64> {
+    pub const fn last_applied_cv(&self) -> Option<f64> {
         self.snapshot.last_cv
     }
 
@@ -136,12 +136,12 @@ impl ControllerSession {
     }
 
     /// Clears the integral accumulator and marks the next tick for D-term protection (`post_reset`).
-    pub fn reset_integral(&mut self) {
+    pub const fn reset_integral(&mut self) {
         self.controller.reset_integral();
     }
 
     /// Updates coalesced state flush cadence (used when `--interval` changes at runtime).
-    pub fn set_flush_interval(&mut self, flush_interval: Option<Duration>) {
+    pub const fn set_flush_interval(&mut self, flush_interval: Option<Duration>) {
         self.flush_interval = flush_interval;
     }
 
@@ -315,13 +315,13 @@ impl ControllerSession {
     /// Returns `true` when the number of consecutive state write failures has
     /// reached the escalation threshold (`--state-fail-after`).
     #[must_use]
-    pub fn state_fail_escalated(&self) -> bool {
+    pub const fn state_fail_escalated(&self) -> bool {
         self.state_fail_count >= self.state_fail_after && self.state_fail_after > 0
     }
 
     /// Returns the current consecutive state write failure count.
     #[must_use]
-    pub fn state_fail_count(&self) -> u32 {
+    pub const fn state_fail_count(&self) -> u32 {
         self.state_fail_count
     }
 
@@ -530,7 +530,7 @@ fn timestamp_to_utc(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
     (year, month, day, hour, min, sec)
 }
 
-fn is_leap_year(year: u64) -> bool {
+const fn is_leap_year(year: u64) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 

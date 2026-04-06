@@ -210,7 +210,7 @@ impl DTermSkippedEvent {
 
 /// Converts a `DTermSkipReason` to its plan-specified string representation.
 #[must_use]
-pub fn reason_str(reason: pid_ctl_core::DTermSkipReason) -> &'static str {
+pub const fn reason_str(reason: pid_ctl_core::DTermSkipReason) -> &'static str {
     match reason {
         pid_ctl_core::DTermSkipReason::NoPvPrev => "no_pv_prev",
         pid_ctl_core::DTermSkipReason::PostDtSkip => "post_dt_skip",

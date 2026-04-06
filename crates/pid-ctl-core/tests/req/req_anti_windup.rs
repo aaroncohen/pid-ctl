@@ -148,6 +148,7 @@ fn integral_contribution_not_promised_to_match_raw_i_acc_units() {
 }
 
 #[test]
+#[allow(clippy::redundant_clone)] // One `PidConfig` clone is required for two `..base` updates without `Copy`.
 fn anti_windup_strategy_clamp_behaves_differently_from_back_calc() {
     let base = PidConfig {
         setpoint: 10.0,
@@ -157,12 +158,12 @@ fn anti_windup_strategy_clamp_behaves_differently_from_back_calc() {
         out_max: 2.0,
         ..PidConfig::default()
     };
-    let mut clamp_strategy = controller(PidConfig {
-        anti_windup: AntiWindupStrategy::Clamp,
-        ..base.clone()
-    });
     let mut back_calc_strategy = controller(PidConfig {
         anti_windup: AntiWindupStrategy::BackCalculation,
+        ..base.clone()
+    });
+    let mut clamp_strategy = controller(PidConfig {
+        anti_windup: AntiWindupStrategy::Clamp,
         ..base
     });
 
