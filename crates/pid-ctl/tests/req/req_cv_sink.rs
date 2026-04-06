@@ -107,6 +107,28 @@ fn once_cv_cmd_failure_exits_5() {
     cmd.assert().code(5);
 }
 
+/// Failed `--cv-cmd` surfaces subprocess stderr in the error (for debugging paths, sim errors, etc.).
+#[test]
+fn once_cv_cmd_failure_includes_stderr_hint() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv",
+        "50.0",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--cv-cmd",
+        "echo simulated_failure >&2; exit 1",
+    ]);
+
+    cmd.assert()
+        .code(5)
+        .stderr(contains("stderr:"))
+        .stderr(contains("simulated_failure"));
+}
+
 /// `once --cv-cmd` with `--cv-cmd-timeout` enforces the timeout on slow commands.
 #[cfg(unix)]
 #[test]

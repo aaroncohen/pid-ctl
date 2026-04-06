@@ -24,7 +24,6 @@ use crate::build_cv_sink;
 use crate::build_pv_source;
 use crate::emit_state_write_failure;
 use crate::handle_dt_skip_state_write;
-use crate::millis_round_u64;
 use crate::open_log_optional;
 use crate::print_iteration_json;
 use crate::write_safe_cv;
@@ -198,6 +197,15 @@ impl TuneUiState {
     }
 }
 
+/// Minimum time between full-frame redraws while waiting for the next PID tick.
+///
+/// Without this, the loop redraws on every `event::poll` wakeup (~20 Hz for a 50 ms cap), which
+/// steals wall time from the subprocess + controller work and stretches measured `raw_dt` away
+/// from `--interval` — undermining tuning on a production-like cadence.
+const TUNE_IDLE_DRAW_MIN: Duration = Duration::from_millis(200);
+/// Redraw at least this often when the next tick is near so the countdown stays legible.
+const TUNE_IDLE_DRAW_DEADLINE_NEAR: Duration = Duration::from_millis(120);
+
 /// Runs the interactive tuning dashboard until the operator quits or a fatal loop error occurs.
 pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
@@ -234,6 +242,9 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
     let mut next_deadline = Instant::now() + args.interval;
     let mut last_interval = args.interval;
     let mut last_tick = Instant::now();
+    let mut last_idle_draw = Instant::now()
+        .checked_sub(TUNE_IDLE_DRAW_MIN)
+        .unwrap_or_else(Instant::now);
     let mut cv_fail_count: u32 = 0;
     let mut pv_fail_count: u32 = 0;
 
@@ -249,10 +260,14 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
             let until_deadline = next_deadline.saturating_duration_since(now);
             let poll_wait = until_deadline.min(Duration::from_millis(50));
 
+            let mut had_terminal_event = false;
             if event::poll(poll_wait).map_err(|e| CliError::new(1, format!("event poll: {e}")))? {
                 match event::read().map_err(|e| CliError::new(1, format!("event read: {e}")))? {
-                    Event::Resize(_, _) => {}
+                    Event::Resize(_, _) => {
+                        had_terminal_event = true;
+                    }
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        had_terminal_event = true;
                         if ui.help_overlay && matches!(key.code, KeyCode::Esc | KeyCode::Char('?'))
                         {
                             ui.help_overlay = false;
@@ -288,14 +303,21 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
             let now = Instant::now();
             let interval_secs = args.interval.as_secs_f64();
             if now < next_deadline {
-                draw(
-                    &mut terminal,
-                    &session,
-                    &args,
-                    &ui,
-                    interval_secs,
-                    next_deadline.saturating_duration_since(now),
-                )?;
+                let until = next_deadline.saturating_duration_since(now);
+                let should_idle_draw = had_terminal_event
+                    || until < TUNE_IDLE_DRAW_DEADLINE_NEAR
+                    || now.duration_since(last_idle_draw) >= TUNE_IDLE_DRAW_MIN;
+                if should_idle_draw {
+                    draw(
+                        &mut terminal,
+                        &session,
+                        &args,
+                        &ui,
+                        interval_secs,
+                        until,
+                    )?;
+                    last_idle_draw = now;
+                }
                 continue;
             }
 
@@ -304,13 +326,10 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
             let raw_dt = now.duration_since(last_tick).as_secs_f64();
             last_tick = now;
 
-            if raw_dt > interval_secs {
-                json_events::emit_interval_slip(
-                    &mut log_file,
-                    millis_round_u64(interval_secs * 1000.0),
-                    millis_round_u64(raw_dt * 1000.0),
-                );
-            }
+            // Do not emit `interval_slip` here: interactive `--tune` interleaves keyboard polling,
+            // PV/CV subprocess work, and throttled full-frame redraws. Measured `raw_dt` between tick
+            // starts can still exceed `--interval` without indicating an unattended scheduling
+            // problem (see Reliability §10 — `interval_slip` remains for non-tune `loop` in `main.rs`).
 
             let dt = match apply_measured_dt(
                 raw_dt,
@@ -334,6 +353,7 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
                         interval_secs,
                         next_deadline.saturating_duration_since(Instant::now()),
                     )?;
+                    last_idle_draw = Instant::now();
                     continue;
                 }
                 MeasuredDt::Use(dt) => dt,
@@ -370,6 +390,7 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
                         interval_secs,
                         next_deadline.saturating_duration_since(Instant::now()),
                     )?;
+                    last_idle_draw = Instant::now();
                     continue;
                 }
             };
@@ -447,6 +468,7 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
                 interval_secs,
                 next_deadline.saturating_duration_since(Instant::now()),
             )?;
+            last_idle_draw = Instant::now();
         }
     })();
 
@@ -501,7 +523,9 @@ fn tune_tick(
                 write_safe_cv(args.safe_cv, cv_sink, session);
                 return Err(CliError::new(
                     2,
-                    format!("exiting after {cv_fail_count} consecutive CV write failures"),
+                    format!(
+                        "exiting after {cv_fail_count} consecutive CV write failures: {error}"
+                    ),
                 ));
             }
             Ok(None)
@@ -908,12 +932,33 @@ fn spark_data(values: &VecDeque<f64>) -> Vec<u64> {
     if values.is_empty() {
         return vec![];
     }
-    let min_v = values.iter().copied().fold(f64::INFINITY, f64::min);
-    let max_v = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let span = (max_v - min_v).max(1e-9);
+    let mut min_v = f64::INFINITY;
+    let mut max_v = f64::NEG_INFINITY;
+    let mut any_finite = false;
+    for &v in values {
+        if v.is_finite() {
+            any_finite = true;
+            min_v = min_v.min(v);
+            max_v = max_v.max(v);
+        }
+    }
+    if !any_finite {
+        return vec![0; values.len()];
+    }
+    let span = max_v - min_v;
+    if span <= 1e-9 {
+        // Constant series: `(v - min) / span` would be all zeros — ratatui draws no visible bars.
+        // Use a flat mid-line so history is visible (e.g. dry-run + sim: PV stuck until CV reaches plant).
+        return vec![50; values.len()];
+    }
     values
         .iter()
-        .map(|v| (((v - min_v) / span) * 100.0).round() as u64)
+        .map(|v| {
+            if !v.is_finite() {
+                return 0u64;
+            }
+            (((v - min_v) / span) * 100.0).clamp(0.0, 100.0).round() as u64
+        })
         .collect()
 }
 
@@ -1126,6 +1171,7 @@ Tuning tips: start with Ki=0 and Kd=0; raise Kp until responsive without heavy o
 Anti-windup: integral back-calculates when the actuator saturates so the I accumulator self-corrects.\n\
 \n\
 Keys: ↑↓ focus gains  ←→ adjust  [ ] step  / command  r integrator reset  s save  c export  h hold  d dry-run  ? help  q quit\n\
+Dry-run / simulation: with `d` on (or `--dry-run`), CV is not sent to `--cv-cmd` — a simulated plant will not move; sparklines stay flat until dry-run is off.\n\
 Command mode: kp/ki/kd/sp <value>, interval <dur>, reset, hold, resume, save, export, quit\n\
 Export / copy-paste: c or export prints a full non-interactive CLI (and a short “Tuned gains only” line) to stderr; also printed on clean quit.\n\
 ";
@@ -1407,9 +1453,30 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::{GainAnnotation, build_export_line_values, pv_history_trend, spark_marker_row};
+    use super::{
+        GainAnnotation, build_export_line_values, pv_history_trend, spark_data, spark_marker_row,
+    };
     use std::collections::VecDeque;
     use std::time::Duration;
+
+    #[test]
+    fn spark_data_flat_series_is_visible_mid_line() {
+        let mut d = VecDeque::new();
+        d.push_back(22.0);
+        d.push_back(22.0);
+        d.push_back(22.0);
+        let s = spark_data(&d);
+        assert_eq!(s, vec![50, 50, 50]);
+    }
+
+    #[test]
+    fn spark_data_spanning_series_normalized() {
+        let mut d = VecDeque::new();
+        d.push_back(0.0);
+        d.push_back(10.0);
+        let s = spark_data(&d);
+        assert_eq!(s, vec![0, 100]);
+    }
 
     #[test]
     fn pv_trend_arrow_when_history_rises() {

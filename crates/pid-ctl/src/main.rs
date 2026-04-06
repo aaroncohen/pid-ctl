@@ -352,7 +352,9 @@ fn run_loop_tick(
                 write_safe_cv(args.safe_cv, cv_sink, session);
                 return Err(CliError::new(
                     2,
-                    format!("exiting after {cv_fail_count} consecutive CV write failures"),
+                    format!(
+                        "exiting after {cv_fail_count} consecutive CV write failures: {error}"
+                    ),
                 ));
             }
         }

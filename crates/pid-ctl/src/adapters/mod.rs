@@ -398,29 +398,51 @@ impl CvSink for CmdCvSink {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", &command]);
         cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
+        cmd.stderr(Stdio::piped());
         #[cfg(unix)]
         cmd.process_group(0);
 
         let mut child = cmd.spawn()?;
+        let stderr_pipe = child.stderr.take();
 
         let outcome = child.wait_timeout(self.timeout);
         match outcome {
             Ok(Some(status)) => {
+                let mut err_text = String::new();
+                if let Some(mut s) = stderr_pipe {
+                    let _ = Read::read_to_string(&mut s, &mut err_text);
+                }
                 if status.success() {
                     Ok(())
                 } else {
-                    Err(io::Error::other(format!(
-                        "CV command exited with {status}: {command}"
-                    )))
+                    let detail = err_text.trim();
+                    let msg = if detail.is_empty() {
+                        format!("CV command exited with {status}: {command}")
+                    } else {
+                        format!("CV command exited with {status}: {command}\nstderr: {detail}")
+                    };
+                    Err(io::Error::other(msg))
                 }
             }
             Ok(None) => {
                 kill_child_process_tree(&mut child);
                 let _ = child.wait();
+                let mut err_text = String::new();
+                if let Some(mut s) = stderr_pipe {
+                    let _ = Read::read_to_string(&mut s, &mut err_text);
+                }
+                let detail = err_text.trim();
+                let tail = if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nstderr: {detail}")
+                };
                 Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("CV command timed out after {:?}: `{command}`", self.timeout),
+                    format!(
+                        "CV command timed out after {:?}: `{command}`{tail}",
+                        self.timeout
+                    ),
                 ))
             }
             Err(e) => {

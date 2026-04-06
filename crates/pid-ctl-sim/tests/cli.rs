@@ -70,6 +70,36 @@ fn init_print_apply_roundtrip_first_order() {
     assert!(pv > 0.15 && pv < 0.25, "unexpected pv {pv}");
 }
 
+/// Negative CV must parse after `--cv` (pid-ctl substitutes `{cv}` → e.g. `-0.03` for shell/clap).
+#[test]
+fn apply_cv_accepts_negative_value() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("neg.json");
+    Command::new(cargo_bin("pid-ctl-sim"))
+        .args([
+            "init",
+            "--state",
+            state.to_str().expect("utf8"),
+            "--plant",
+            "first-order",
+        ])
+        .assert()
+        .success();
+
+    Command::new(cargo_bin("pid-ctl-sim"))
+        .args([
+            "apply-cv",
+            "--state",
+            state.to_str().expect("utf8"),
+            "--dt",
+            "0.5",
+            "--cv",
+            "-0.03",
+        ])
+        .assert()
+        .success();
+}
+
 #[test]
 fn rejects_bad_schema_version() {
     let dir = tempdir().expect("tempdir");

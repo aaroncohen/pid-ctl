@@ -8,15 +8,18 @@
 //! **`--dry-run` disables CV output** in the tuning TUI — the plant never sees the actuator. For a
 //! live simulated plant, omit `--dry-run` or press `d` in the dashboard to turn dry-run off.
 //!
-//! Example (build both crates from the workspace root):
+//! Example (run from workspace root after `cargo build -p pid-ctl -p pid-ctl-sim`):
 //!
 //! ```text
-//! pid-ctl-sim init --state /tmp/plant.json --plant thermal
-//! pid-ctl loop --tune \
-//!   --pv-cmd "pid-ctl-sim print-pv --state /tmp/plant.json" \
-//!   --cv-cmd "pid-ctl-sim apply-cv --state /tmp/plant.json --dt 0.5 --cv {cv}" \
+//! ./target/debug/pid-ctl-sim init --state /tmp/plant.json --plant thermal
+//! ./target/debug/pid-ctl loop --tune \
+//!   --pv-cmd "./target/debug/pid-ctl-sim print-pv --state /tmp/plant.json" \
+//!   --cv-cmd "./target/debug/pid-ctl-sim apply-cv --state /tmp/plant.json --dt 0.5 --cv {cv}" \
 //!   --interval 500ms --setpoint 22 --kp 0.5 --ki 0.02 --kd 0
 //! ```
+//!
+//! Use **`./target/debug/pid-ctl-sim`** (or an absolute path): `./pid-ctl-sim` only works if your
+//! shell cwd is the directory that **contains** that binary (e.g. `target/debug`), not the repo root.
 //!
 //! # Tick ordering
 //!
@@ -65,7 +68,8 @@ enum Command {
         /// Seconds — should match `pid-ctl` `--interval` when tuning (no `{dt}` in cv-cmd yet).
         #[arg(long)]
         dt: f64,
-        #[arg(long)]
+        /// Controller output (may be negative — must not be parsed as a new flag after `--cv`).
+        #[arg(long, allow_hyphen_values = true)]
         cv: f64,
     },
 }
