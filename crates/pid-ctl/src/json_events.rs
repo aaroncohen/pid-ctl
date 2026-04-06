@@ -258,3 +258,39 @@ pub fn emit_pv_fail_after_reached(
         &PvFailAfterReachedEvent::new(consecutive_failures, limit),
     );
 }
+
+#[derive(Serialize)]
+pub struct StateWriteEscalatedEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub path: PathBuf,
+    pub error: String,
+    pub consecutive_failures: u32,
+}
+
+impl StateWriteEscalatedEvent {
+    #[must_use]
+    pub fn new(path: PathBuf, error: impl Into<String>, consecutive_failures: u32) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "state_write_escalated",
+            path,
+            error: error.into(),
+            consecutive_failures,
+        }
+    }
+}
+
+pub fn emit_state_write_escalated(
+    log: &mut Option<std::fs::File>,
+    path: PathBuf,
+    error: impl Into<String>,
+    consecutive_failures: u32,
+) {
+    emit_line(
+        log,
+        &StateWriteEscalatedEvent::new(path, error, consecutive_failures),
+    );
+}

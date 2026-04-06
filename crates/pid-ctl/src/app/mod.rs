@@ -7,6 +7,7 @@ use pid_ctl_core::{ConfigError, PidConfig, PidController, StepInput, StepResult}
 use serde::Serialize;
 use std::error::Error;
 use std::fmt;
+use std::time::{Duration, Instant};
 use time::format_description::well_known::Rfc3339;
 
 pub use state_store::{
@@ -20,6 +21,28 @@ pub struct SessionConfig {
     pub pid: PidConfig,
     pub state_store: Option<StateStore>,
     pub reset_accumulator: bool,
+    /// Maximum frequency of state snapshot flushes to disk.
+    ///
+    /// `None` means write on every tick (used for `once`).
+    /// For `loop` the default is `max(tick_interval, 100ms)`.
+    /// For `pipe` the default is `1s`.
+    pub flush_interval: Option<Duration>,
+    /// Number of consecutive state write failures before escalating to a
+    /// prominent per-cycle stderr warning. Default: 10.
+    pub state_fail_after: u32,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            name: None,
+            pid: PidConfig::default(),
+            state_store: None,
+            reset_accumulator: false,
+            flush_interval: None,
+            state_fail_after: 10,
+        }
+    }
 }
 
 /// Orchestrates PID core state, persisted snapshots, and confirmed CV writes.
@@ -29,6 +52,14 @@ pub struct ControllerSession {
     snapshot: StateSnapshot,
     state_store: Option<StateStore>,
     _state_lock: Option<StateLock>,
+    /// Maximum interval between disk flushes. `None` = flush every call.
+    flush_interval: Option<Duration>,
+    /// Monotonic instant of the last successful (or attempted) flush.
+    last_flush: Option<Instant>,
+    /// Consecutive state write failures since last success.
+    state_fail_count: u32,
+    /// Threshold after which failures escalate to a prominent per-cycle warning.
+    state_fail_after: u32,
 }
 
 impl ControllerSession {
@@ -67,6 +98,10 @@ impl ControllerSession {
             snapshot,
             state_store,
             _state_lock: state_lock,
+            flush_interval: config.flush_interval,
+            last_flush: None,
+            state_fail_count: 0,
+            state_fail_after: config.state_fail_after,
         })
     }
 
@@ -180,12 +215,69 @@ impl ControllerSession {
         }
     }
 
-    fn persist_snapshot(&self) -> Result<(), StateStoreError> {
-        if let Some(state_store) = &self.state_store {
-            state_store.save(&self.snapshot)?;
+    /// Writes the current snapshot to disk, respecting `flush_interval` coalescing.
+    ///
+    /// When `flush_interval` is set, skips the write if not enough time has
+    /// elapsed since the last flush. In-memory state is always current regardless.
+    ///
+    /// Updates `state_fail_count` on failure / success for escalation tracking.
+    fn persist_snapshot(&mut self) -> Result<(), StateStoreError> {
+        let Some(state_store) = &self.state_store else {
+            return Ok(());
+        };
+
+        // Coalescing: skip disk write if within the flush interval.
+        if let (Some(interval), Some(last)) = (self.flush_interval, self.last_flush)
+            && last.elapsed() < interval
+        {
+            return Ok(());
         }
 
-        Ok(())
+        let result = state_store.save(&self.snapshot);
+        match &result {
+            Ok(()) => {
+                self.state_fail_count = 0;
+                self.last_flush = Some(Instant::now());
+            }
+            Err(_) => {
+                self.state_fail_count = self.state_fail_count.saturating_add(1);
+            }
+        }
+        result
+    }
+
+    /// Forces a disk flush regardless of `flush_interval`.
+    ///
+    /// Used at shutdown to ensure the final in-memory state is persisted.
+    /// Updates `state_fail_count` on failure / success.
+    pub fn force_flush(&mut self) -> Option<StateStoreError> {
+        let Some(state_store) = &self.state_store else {
+            return None;
+        };
+        match state_store.save(&self.snapshot) {
+            Ok(()) => {
+                self.state_fail_count = 0;
+                self.last_flush = Some(Instant::now());
+                None
+            }
+            Err(e) => {
+                self.state_fail_count = self.state_fail_count.saturating_add(1);
+                Some(e)
+            }
+        }
+    }
+
+    /// Returns `true` when the number of consecutive state write failures has
+    /// reached the escalation threshold (`--state-fail-after`).
+    #[must_use]
+    pub fn state_fail_escalated(&self) -> bool {
+        self.state_fail_count >= self.state_fail_after && self.state_fail_after > 0
+    }
+
+    /// Returns the current consecutive state write failure count.
+    #[must_use]
+    pub fn state_fail_count(&self) -> u32 {
+        self.state_fail_count
     }
 }
 
@@ -424,10 +516,8 @@ mod tests {
         };
 
         let session_cfg = SessionConfig {
-            name: None,
             pid: cfg,
-            state_store: None,
-            reset_accumulator: false,
+            ..SessionConfig::default()
         };
 
         let mut session = ControllerSession::new(session_cfg).expect("session");
@@ -460,10 +550,8 @@ mod tests {
         };
 
         let session_cfg = SessionConfig {
-            name: None,
             pid: cfg,
-            state_store: None,
-            reset_accumulator: false,
+            ..SessionConfig::default()
         };
 
         let mut session = ControllerSession::new(session_cfg).expect("session");
@@ -486,10 +574,8 @@ mod tests {
         };
 
         let session_cfg = SessionConfig {
-            name: None,
             pid: cfg,
-            state_store: None,
-            reset_accumulator: false,
+            ..SessionConfig::default()
         };
 
         let mut session = ControllerSession::new(session_cfg).expect("session");

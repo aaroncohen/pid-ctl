@@ -38,6 +38,8 @@ mod req_reliability;
 mod req_state_commands;
 #[path = "req/req_state_schema.rs"]
 mod req_state_schema;
+#[path = "req/req_state_write_interval.rs"]
+mod req_state_write_interval;
 #[path = "req/req_stdout_contract.rs"]
 mod req_stdout_contract;
 

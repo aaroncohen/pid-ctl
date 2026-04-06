@@ -158,14 +158,7 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
         }
 
         if let Some(error) = outcome.state_write_failed {
-            eprintln!("state persistence failed: {error}");
-            if let Some(path) = &args.state_path {
-                json_events::emit_state_write_failed(
-                    &mut log_file,
-                    path.clone(),
-                    error.to_string(),
-                );
-            }
+            emit_state_write_failure(&session, args.state_path.as_ref(), &mut log_file, &error);
         }
     }
 
@@ -211,6 +204,7 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
         // Check shutdown flag at top of each iteration.
         if shutdown.load(Ordering::Relaxed) {
             write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
+            flush_state_at_shutdown(&mut session, args.state_path.as_ref(), &mut log_file);
             break;
         }
 
@@ -223,6 +217,7 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
         // Check shutdown again after sleeping (signal may have arrived during sleep).
         if shutdown.load(Ordering::Relaxed) {
             write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
+            flush_state_at_shutdown(&mut session, args.state_path.as_ref(), &mut log_file);
             break;
         }
 
@@ -254,16 +249,12 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
             &mut log_file,
         ) {
             MeasuredDt::Skip => {
-                if let Some(err) = session.on_dt_skipped() {
-                    eprintln!("state write failed: {err}");
-                    if let Some(path) = &args.state_path {
-                        json_events::emit_state_write_failed(
-                            &mut log_file,
-                            path.clone(),
-                            err.to_string(),
-                        );
-                    }
-                }
+                handle_dt_skip_state_write(
+                    session.on_dt_skipped(),
+                    &session,
+                    args.state_path.as_ref(),
+                    &mut log_file,
+                );
                 continue;
             }
             MeasuredDt::Use(dt) => dt,
@@ -283,11 +274,7 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
                 if let Some(limit) = args.fail_after
                     && pv_fail_count >= limit
                 {
-                    json_events::emit_pv_fail_after_reached(
-                        &mut log_file,
-                        pv_fail_count,
-                        limit,
-                    );
+                    json_events::emit_pv_fail_after_reached(&mut log_file, pv_fail_count, limit);
                     return Err(CliError::new(
                         2,
                         format!("exiting after {pv_fail_count} consecutive PV read failures"),
@@ -346,10 +333,7 @@ fn run_loop_tick(
             }
 
             if let Some(error) = outcome.state_write_failed {
-                eprintln!("state write failed: {error}");
-                if let Some(path) = &args.state_path {
-                    json_events::emit_state_write_failed(log_file, path.clone(), error.to_string());
-                }
+                emit_state_write_failure(session, args.state_path.as_ref(), log_file, &error);
             }
         }
         Err(error) => {
@@ -491,6 +475,54 @@ fn write_safe_cv(safe_cv: Option<f64>, cv_sink: &mut dyn CvSink, session: &mut C
     }
 }
 
+/// Handles a state write failure that occurred during a dt-skip, applying escalation logic.
+fn handle_dt_skip_state_write(
+    err: Option<pid_ctl::app::StateStoreError>,
+    session: &ControllerSession,
+    state_path: Option<&std::path::PathBuf>,
+    log_file: &mut Option<std::fs::File>,
+) {
+    let Some(err) = err else {
+        return;
+    };
+    emit_state_write_failure(session, state_path, log_file, &err);
+}
+
+/// Emits a state write failure — escalated warning if threshold reached, plain log otherwise.
+fn emit_state_write_failure(
+    session: &ControllerSession,
+    state_path: Option<&std::path::PathBuf>,
+    log_file: &mut Option<std::fs::File>,
+    err: &pid_ctl::app::StateStoreError,
+) {
+    if let Some(path) = state_path {
+        if session.state_fail_escalated() {
+            let count = session.state_fail_count();
+            eprintln!("WARNING: state write failing persistently ({count} consecutive): {err}");
+            json_events::emit_state_write_escalated(log_file, path.clone(), err.to_string(), count);
+        } else {
+            eprintln!("state write failed: {err}");
+            json_events::emit_state_write_failed(log_file, path.clone(), err.to_string());
+        }
+    } else {
+        eprintln!("state write failed: {err}");
+    }
+}
+
+/// Forces a final state flush at loop shutdown, logging any failure.
+fn flush_state_at_shutdown(
+    session: &mut ControllerSession,
+    state_path: Option<&std::path::PathBuf>,
+    log_file: &mut Option<std::fs::File>,
+) {
+    if let Some(err) = session.force_flush() {
+        eprintln!("state write failed at shutdown: {err}");
+        if let Some(path) = state_path {
+            json_events::emit_state_write_failed(log_file, path.clone(), err.to_string());
+        }
+    }
+}
+
 fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
     let common = parse_common_args(args, CommandKind::Loop)?;
 
@@ -534,6 +566,15 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
     let effective_cmd_timeout = common.cmd_timeout.unwrap_or(Duration::from_secs(5));
     let pv_cmd_timeout = common.pv_cmd_timeout.unwrap_or(effective_cmd_timeout);
 
+    // Default state_write_interval for loop: max(tick_interval, 100ms).
+    let min_flush = Duration::from_millis(100);
+    let default_state_write_interval = interval.max(min_flush);
+    let state_write_interval = Some(
+        common
+            .state_write_interval
+            .unwrap_or(default_state_write_interval),
+    );
+
     Ok(LoopArgs {
         interval,
         pv_source,
@@ -557,6 +598,8 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         dry_run: common.dry_run,
         pv_stdin_timeout,
         verify_cv: common.verify_cv,
+        state_write_interval,
+        state_fail_after: common.state_fail_after.unwrap_or(10),
     })
 }
 
@@ -822,6 +865,13 @@ fn parse_pipe(args: &[String]) -> Result<PipeArgs, CliError> {
 
     let pid_config = resolve_pid_config(&common.pid_flags, common.state_path.as_deref())?;
 
+    // Default state_write_interval for pipe: 1s.
+    let state_write_interval = Some(
+        common
+            .state_write_interval
+            .unwrap_or(Duration::from_secs(1)),
+    );
+
     Ok(PipeArgs {
         dt: common.dt,
         pid_config,
@@ -831,6 +881,8 @@ fn parse_pipe(args: &[String]) -> Result<PipeArgs, CliError> {
         scale: common.scale.unwrap_or(1.0),
         cv_precision: common.cv_precision.unwrap_or(2) as usize,
         log_path: common.log_path,
+        state_write_interval,
+        state_fail_after: common.state_fail_after.unwrap_or(10),
     })
 }
 
@@ -1084,6 +1136,14 @@ fn handle_common_option(
         }
         "--log" => {
             parsed.log_path = Some(parse_path_flag("--log", args, index)?);
+        }
+        "--state-write-interval" => {
+            let value = next_value("--state-write-interval", args, index)?;
+            parsed.state_write_interval =
+                Some(parse_duration_flag("--state-write-interval", &value)?);
+        }
+        "--state-fail-after" => {
+            parsed.state_fail_after = Some(parse_u32_flag("--state-fail-after", args, index)?);
         }
         _ => return Ok(false),
     }
@@ -1351,6 +1411,8 @@ struct CommonArgs {
     dry_run: bool,
     pv_stdin_timeout: Option<Duration>,
     verify_cv: bool,
+    state_write_interval: Option<Duration>,
+    state_fail_after: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1391,6 +1453,9 @@ impl OnceArgs {
             pid: self.pid_config.clone(),
             state_store: self.state_path.clone().map(StateStore::new),
             reset_accumulator: self.reset_accumulator,
+            // once always writes every tick (no coalescing)
+            flush_interval: None,
+            state_fail_after: 10,
         }
     }
 }
@@ -1405,6 +1470,8 @@ struct PipeArgs {
     scale: f64,
     cv_precision: usize,
     log_path: Option<PathBuf>,
+    state_write_interval: Option<Duration>,
+    state_fail_after: u32,
 }
 
 impl PipeArgs {
@@ -1414,6 +1481,8 @@ impl PipeArgs {
             pid: self.pid_config.clone(),
             state_store: self.state_path.clone().map(StateStore::new),
             reset_accumulator: self.reset_accumulator,
+            flush_interval: self.state_write_interval,
+            state_fail_after: self.state_fail_after,
         }
     }
 }
@@ -1443,6 +1512,8 @@ struct LoopArgs {
     dry_run: bool,
     pv_stdin_timeout: Duration,
     verify_cv: bool,
+    state_write_interval: Option<Duration>,
+    state_fail_after: u32,
 }
 
 impl LoopArgs {
@@ -1452,6 +1523,8 @@ impl LoopArgs {
             pid: self.pid_config.clone(),
             state_store: self.state_path.clone().map(StateStore::new),
             reset_accumulator: self.reset_accumulator,
+            flush_interval: self.state_write_interval,
+            state_fail_after: self.state_fail_after,
         }
     }
 }
