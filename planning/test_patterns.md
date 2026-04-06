@@ -5,6 +5,7 @@
 - Requirements live in `pid-ctl_plan.md`; **tests name behaviors**, not internal helpers.
 - **Social / behavioral tests:** Prefer **API interaction points** and **output-for-input correctness** — what callers observe when they supply inputs (CLI flags, `StepInput`, files, socket payloads). Assertions should survive refactors that preserve behavior: avoid coupling tests to private fields, internal function call order, or “how” the code is structured unless the plan documents that as part of the contract. Table and property tests still target **observable** outcomes (e.g. `StepResult.cv`, exit codes, NDJSON fields), not implementation trivia.
 - **Core (`pid-ctl-core`):** tests inject `dt` as data — no wall-clock coupling, no `sleep` for correctness. See plan *Architecture & Code Structure* → principle **Core tests are not tied to the wall clock**.
+- **`pid-ctl-sim` plant math:** Same idea — dynamics are explicit `dt` in `apply_cv`; no `Instant` inside the model. CLI integration tests exercise `init` / `print-pv` / `apply-cv` via `assert_cmd`.
 - `pid-ctl-core`: table-driven and **proptest** checks live in `src/` next to the module under test; integration harness is `tests/requirements.rs`.
 - `pid-ctl`: orchestration, state JSON, and CLI contracts use `tests/requirements.rs` modules; use **`assert_cmd`** + **`tempfile`** for subprocess/FS cases once the binary exists.
 
@@ -16,6 +17,7 @@
 | `crates/pid-ctl-core/tests/req/*.rs` | Core behavior vs plan (error convention, controller form, D-on-measurement, anti-windup, setpoint ramp, deadband, filter, output/slew, step I/O, dt, cross-cutting) — included via `#[path = ...]` (**not** top-level `tests/*.rs`, or Cargo builds one binary per file) |
 | `crates/pid-ctl/tests/requirements.rs` | App/CLI harness + smoke test |
 | `crates/pid-ctl/tests/req/*.rs` | Reliability, schema, CLI |
+| `crates/pid-ctl-sim` | Library + `pid-ctl-sim` binary; integration tests in `tests/` (e.g. `cli.rs`) |
 
 ## Ignored tests
 
@@ -48,3 +50,4 @@ Versions are centralized in the root `Cargo.toml` `[workspace.dependencies]`; bu
 - **PV trend label:** `pv_history_trend` (first vs last sample in the deque) is unit-tested for the “trending ▲” case.
 - **`once --log`:** Successful ticks append one iteration NDJSON line (same shape as `loop`); `state_write_failed` also emits a structured `state_write_failed` event before exit 4 when `--state` is set.
 - **Clippy `redundant_clone` vs two `..base` updates:** When a test builds two `PidConfig { .. }` values from the same `base` without `Copy`, exactly one `.clone()` is required. `clippy::redundant_clone` may still fire on that clone; suppress with a targeted `#[allow(clippy::redundant_clone)]` on the test and a one-line rationale (prefer this over `PidConfig: Copy`, which would force broad `clone_on_copy` cleanups across tests).
+- **`pid-ctl` + `pid-ctl-sim` subprocess smoke:** `req_sim_loop.rs` resolves `target/debug/pid-ctl-sim` via `std::env::current_exe()` (strip `deps/` then `debug/`) so it matches the same `CARGO_TARGET_DIR` as the test binary; `CARGO_MANIFEST_DIR/../../target/debug` breaks under custom target dirs. Build the sim binary first (`cargo build -p pid-ctl-sim` or `cargo test --workspace`) so the artifact exists beside `pid-ctl`.
