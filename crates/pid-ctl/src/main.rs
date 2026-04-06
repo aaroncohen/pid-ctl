@@ -84,7 +84,7 @@ fn run_once(args: &OnceArgs) -> Result<(), CliError> {
 
     let dt = resolve_once_dt(&session, args, &mut log_file);
 
-    let raw_pv = resolve_pv(&args.pv_source, args.cmd_timeout)
+    let raw_pv = resolve_pv(&args.pv_source, args.pv_cmd_timeout)
         .map_err(|error| CliError::new(1, format!("failed to read PV: {error}")))?;
     let scaled_pv = raw_pv * args.scale;
     match session.process_pv(scaled_pv, dt, sink.as_mut()) {
@@ -176,7 +176,8 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
 fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
-    let mut pv_source = build_pv_source(&args.pv_source, args.cmd_timeout, args.pv_stdin_timeout);
+    let mut pv_source =
+        build_pv_source(&args.pv_source, args.pv_cmd_timeout, args.pv_stdin_timeout);
     let mut cv_sink: Box<dyn CvSink> = if args.dry_run {
         Box::new(DryRunCvSink)
     } else {
@@ -530,6 +531,8 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
     let max_dt_default = max_dt_default.max(0.01);
 
     let pv_stdin_timeout = common.pv_stdin_timeout.unwrap_or(interval);
+    let effective_cmd_timeout = common.cmd_timeout.unwrap_or(Duration::from_secs(5));
+    let pv_cmd_timeout = common.pv_cmd_timeout.unwrap_or(effective_cmd_timeout);
 
     Ok(LoopArgs {
         interval,
@@ -542,7 +545,8 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         scale: common.scale.unwrap_or(1.0),
         cv_precision: common.cv_precision.unwrap_or(2) as usize,
         output_format: common.output_format,
-        cmd_timeout: common.cmd_timeout.unwrap_or(Duration::from_secs(5)),
+        cmd_timeout: effective_cmd_timeout,
+        pv_cmd_timeout,
         safe_cv: common.safe_cv,
         cv_fail_after: common.cv_fail_after.unwrap_or(10),
         fail_after: common.fail_after,
@@ -783,9 +787,13 @@ fn parse_once(args: &[String]) -> Result<OnceArgs, CliError> {
         apply_verify_cv(sink, common.verify_cv);
     }
 
+    let effective_cmd_timeout = common.cmd_timeout.unwrap_or(Duration::from_secs(5));
+    let pv_cmd_timeout = common.pv_cmd_timeout.unwrap_or(effective_cmd_timeout);
+
     Ok(OnceArgs {
         pv_source,
-        cmd_timeout: common.cmd_timeout.unwrap_or(Duration::from_secs(5)),
+        cmd_timeout: effective_cmd_timeout,
+        pv_cmd_timeout,
         dt: common.dt,
         dt_explicit: common.dt_explicit,
         min_dt: common.min_dt.unwrap_or(0.01),
@@ -950,6 +958,10 @@ fn parse_common_args(args: &[String], command_kind: CommandKind) -> Result<Commo
             "--cv-cmd-timeout" => {
                 let secs = parse_f64_flag("--cv-cmd-timeout", args, &mut index)?;
                 parsed.cv_cmd_timeout = Some(Duration::from_secs_f64(secs));
+            }
+            "--pv-cmd-timeout" => {
+                let secs = parse_f64_flag("--pv-cmd-timeout", args, &mut index)?;
+                parsed.pv_cmd_timeout = Some(Duration::from_secs_f64(secs));
             }
             "--dry-run" => {
                 if matches!(command_kind, CommandKind::Pipe) {
@@ -1328,6 +1340,7 @@ struct CommonArgs {
     cv_precision: Option<u32>,
     cmd_timeout: Option<Duration>,
     cv_cmd_timeout: Option<Duration>,
+    pv_cmd_timeout: Option<Duration>,
     loop_interval: Option<Duration>,
     safe_cv: Option<f64>,
     cv_fail_after: Option<u32>,
@@ -1344,6 +1357,7 @@ struct CommonArgs {
 struct OnceArgs {
     pv_source: PvSourceConfig,
     cmd_timeout: Duration,
+    pv_cmd_timeout: Duration,
     dt: f64,
     dt_explicit: bool,
     min_dt: f64,
@@ -1418,6 +1432,7 @@ struct LoopArgs {
     cv_precision: usize,
     output_format: OutputFormat,
     cmd_timeout: Duration,
+    pv_cmd_timeout: Duration,
     safe_cv: Option<f64>,
     cv_fail_after: u32,
     fail_after: Option<u32>,

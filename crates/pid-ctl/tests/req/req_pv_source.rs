@@ -129,6 +129,152 @@ fn pipe_rejects_pv_file() {
     cmd.assert().code(3);
 }
 
+/// `once --pv-cmd-timeout` overrides the timeout for `--pv-cmd`.
+/// A `sleep 10` command with a 300ms timeout should fail quickly (before 5s).
+#[cfg(unix)]
+#[test]
+fn once_pv_cmd_timeout_overrides_cmd_timeout() {
+    let start = Instant::now();
+
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv-cmd",
+        "sleep 10",
+        "--pv-cmd-timeout",
+        "0.3",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--cv-stdout",
+    ]);
+
+    // Should fail (PV read failed → exit 1) well before the 10-second sleep completes.
+    cmd.assert().code(1);
+
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "expected timeout well before sleep 10s, took {:?}",
+        start.elapsed()
+    );
+}
+
+/// Without `--pv-cmd-timeout`, PV commands use `--cmd-timeout`.
+/// A `sleep 10` with `--cmd-timeout 0.3` should fail quickly.
+#[cfg(unix)]
+#[test]
+fn once_pv_cmd_uses_cmd_timeout_when_pv_cmd_timeout_absent() {
+    let start = Instant::now();
+
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv-cmd",
+        "sleep 10",
+        "--cmd-timeout",
+        "0.3",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--cv-stdout",
+    ]);
+
+    // Should fail (PV read failed → exit 1) well before the 10-second sleep completes.
+    cmd.assert().code(1);
+
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "expected timeout well before sleep 10s, took {:?}",
+        start.elapsed()
+    );
+}
+
+/// `--pv-cmd-timeout` with an invalid value exits with code 3.
+#[test]
+fn pv_cmd_timeout_invalid_value_exits_3() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv-cmd",
+        "echo 50.0",
+        "--pv-cmd-timeout",
+        "not-a-number",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--cv-stdout",
+    ]);
+
+    cmd.assert().code(3);
+}
+
+/// `loop --pv-cmd-timeout` is accepted by the parser (not rejected as unknown flag).
+/// This verifies the flag is wired up for loop mode — end-to-end behavior is covered
+/// by the once-mode tests since loop retries PV failures rather than exiting.
+#[test]
+fn loop_pv_cmd_timeout_flag_accepted() {
+    use tempfile::tempdir;
+    let dir = tempdir().expect("temporary directory");
+    let cv_path = dir.path().join("cv.txt");
+
+    // A valid float PV cmd with short timeout: flag should be accepted (no exit 3).
+    // We kill the loop early via timeout — the important thing is it doesn't exit 3.
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "loop",
+        "--pv-cmd",
+        "echo 50.0",
+        "--pv-cmd-timeout",
+        "2.0",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--interval",
+        "100ms",
+        "--cv-file",
+        cv_path.to_str().unwrap(),
+    ]);
+    cmd.timeout(Duration::from_millis(400));
+
+    // Process will be killed by timeout — that's expected.
+    // The key assertion is that exit is NOT 3 (which would mean "unrecognized option").
+    let output = cmd.output().expect("command ran");
+    assert_ne!(
+        output.status.code(),
+        Some(3),
+        "--pv-cmd-timeout should be recognized (not exit 3 'unrecognized option')"
+    );
+}
+
+/// `--pv-cmd-timeout` does not affect `--cv-cmd-timeout` — they are independent.
+/// CV command with a generous timeout and PV command that is fast: both should succeed.
+#[cfg(unix)]
+#[test]
+fn pv_cmd_timeout_independent_of_cv_cmd_timeout() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv-cmd",
+        "echo 50.0",
+        "--pv-cmd-timeout",
+        "5.0",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--cv-cmd",
+        "echo {cv}",
+        "--cv-cmd-timeout",
+        "5.0",
+    ]);
+
+    cmd.assert().success();
+}
+
 /// Specifying both `--pv` and `--pv-file` is rejected with exit code 3.
 #[test]
 fn multiple_pv_sources_rejected() {
