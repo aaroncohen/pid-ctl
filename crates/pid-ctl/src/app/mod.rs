@@ -45,6 +45,13 @@ impl Default for SessionConfig {
     }
 }
 
+/// Output of a hold tick: actuator held at `held_cv`, PV read for display only (no PID step).
+#[derive(Debug)]
+pub struct HoldTickOutcome {
+    pub pv: f64,
+    pub state_write_failed: Option<StateStoreError>,
+}
+
 /// Orchestrates PID core state, persisted snapshots, and confirmed CV writes.
 #[derive(Debug)]
 pub struct ControllerSession {
@@ -108,6 +115,44 @@ impl ControllerSession {
     #[must_use]
     pub fn config(&self) -> &PidConfig {
         self.controller.config()
+    }
+
+    /// Last CV confirmed applied to the actuator (from the persisted snapshot).
+    #[must_use]
+    pub fn last_applied_cv(&self) -> Option<f64> {
+        self.snapshot.last_cv
+    }
+
+    /// Updates Kp/Ki/Kd in the live controller and mirrors into the in-memory snapshot for persistence.
+    pub fn set_gains(&mut self, kp: f64, ki: f64, kd: f64) {
+        self.controller.set_gains(kp, ki, kd);
+        self.sync_pid_fields_from_controller();
+    }
+
+    /// Updates the target setpoint in the live controller and mirrors into the snapshot.
+    pub fn set_setpoint(&mut self, setpoint: f64) {
+        self.controller.set_setpoint(setpoint);
+        self.sync_pid_fields_from_controller();
+    }
+
+    /// Clears the integral accumulator and marks the next tick for D-term protection (`post_reset`).
+    pub fn reset_integral(&mut self) {
+        self.controller.reset_integral();
+    }
+
+    /// Updates coalesced state flush cadence (used when `--interval` changes at runtime).
+    pub fn set_flush_interval(&mut self, flush_interval: Option<Duration>) {
+        self.flush_interval = flush_interval;
+    }
+
+    fn sync_pid_fields_from_controller(&mut self) {
+        let c = self.controller.config();
+        self.snapshot.kp = Some(c.kp);
+        self.snapshot.ki = Some(c.ki);
+        self.snapshot.kd = Some(c.kd);
+        self.snapshot.setpoint = Some(c.setpoint);
+        self.snapshot.out_min = finite_value(c.out_min);
+        self.snapshot.out_max = finite_value(c.out_max);
     }
 
     /// Processes a single PV value, writes the resulting CV to the provided
@@ -278,6 +323,28 @@ impl ControllerSession {
     #[must_use]
     pub fn state_fail_count(&self) -> u32 {
         self.state_fail_count
+    }
+
+    /// Holds the last CV at the actuator without advancing PID state or `iter` (operator hold).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TickError::CvWrite`] when the CV sink rejects the write.
+    pub fn hold_tick_write(
+        &mut self,
+        scaled_pv: f64,
+        held_cv: f64,
+        cv_sink: &mut dyn CvSink,
+    ) -> Result<HoldTickOutcome, TickError> {
+        cv_sink
+            .write_cv(held_cv)
+            .map_err(|source| TickError::CvWrite { source })?;
+        self.snapshot.updated_at = Some(now_iso8601());
+        let state_write_failed = self.persist_snapshot().err();
+        Ok(HoldTickOutcome {
+            pv: scaled_pv,
+            state_write_failed,
+        })
     }
 }
 

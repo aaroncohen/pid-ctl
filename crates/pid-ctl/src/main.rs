@@ -1,3 +1,5 @@
+mod tune;
+
 use pid_ctl::adapters::{
     CmdCvSink, CmdPvSource, CvSink, DryRunCvSink, FileCvSink, FilePvSource, PvSource,
     StdinPvSource, StdoutCvSink,
@@ -8,7 +10,7 @@ use pid_ctl::schedule::next_deadline_after_tick;
 use pid_ctl_core::{AntiWindupStrategy, PidConfig};
 use std::env;
 use std::fmt;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
@@ -16,8 +18,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 fn main() {
+    let full_argv: Vec<String> = env::args().collect();
     let args: Vec<String> = env::args().skip(1).collect();
-    let exit_code = match run(&args) {
+    let exit_code = match run(&args, &full_argv) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("{error}");
@@ -28,7 +31,7 @@ fn main() {
     process::exit(exit_code);
 }
 
-fn run(args: &[String]) -> Result<(), CliError> {
+fn run(args: &[String], full_argv: &[String]) -> Result<(), CliError> {
     let Some((command, rest)) = args.split_first() else {
         return Err(CliError::config(
             "usage: pid-ctl <once|pipe|status|purge|init> [OPTIONS]",
@@ -46,7 +49,11 @@ fn run(args: &[String]) -> Result<(), CliError> {
         }
         "loop" => {
             let parsed = parse_loop(rest)?;
-            run_loop(&parsed)
+            if parsed.tune {
+                tune::run(parsed, full_argv.to_vec())
+            } else {
+                run_loop(&parsed)
+            }
         }
         "status" => {
             let state_path = parse_state_flag(rest, "status")?;
@@ -354,7 +361,7 @@ fn run_loop_tick(
     Ok(())
 }
 
-enum MeasuredDt {
+pub(crate) enum MeasuredDt {
     Skip,
     Use(f64),
 }
@@ -364,7 +371,7 @@ enum MeasuredDt {
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-fn millis_round_u64(ms: f64) -> u64 {
+pub(crate) fn millis_round_u64(ms: f64) -> u64 {
     let v = ms.round();
     if !v.is_finite() || v <= 0.0 {
         return 0;
@@ -375,7 +382,7 @@ fn millis_round_u64(ms: f64) -> u64 {
     v as u64
 }
 
-fn open_log_optional(path: Option<&Path>) -> Result<Option<std::fs::File>, CliError> {
+pub(crate) fn open_log_optional(path: Option<&Path>) -> Result<Option<std::fs::File>, CliError> {
     match path {
         Some(p) => {
             let file = std::fs::OpenOptions::new()
@@ -395,7 +402,7 @@ fn open_log_optional(path: Option<&Path>) -> Result<Option<std::fs::File>, CliEr
 }
 
 /// Applies `--min-dt` / `--max-dt` for measured `dt` in `loop`: skip (default) or clamp (`--dt-clamp`).
-fn apply_measured_dt(
+pub(crate) fn apply_measured_dt(
     raw_dt: f64,
     min_dt: f64,
     max_dt: f64,
@@ -466,7 +473,11 @@ fn clamp_once_wall_clock_dt(
 }
 
 /// Writes the safe CV when configured; on success, records it as the last confirmed-applied CV.
-fn write_safe_cv(safe_cv: Option<f64>, cv_sink: &mut dyn CvSink, session: &mut ControllerSession) {
+pub(crate) fn write_safe_cv(
+    safe_cv: Option<f64>,
+    cv_sink: &mut dyn CvSink,
+    session: &mut ControllerSession,
+) {
     if let Some(cv) = safe_cv
         && cv_sink.write_cv(cv).is_ok()
         && let Some(err) = session.record_confirmed_cv(cv)
@@ -476,7 +487,7 @@ fn write_safe_cv(safe_cv: Option<f64>, cv_sink: &mut dyn CvSink, session: &mut C
 }
 
 /// Handles a state write failure that occurred during a dt-skip, applying escalation logic.
-fn handle_dt_skip_state_write(
+pub(crate) fn handle_dt_skip_state_write(
     err: Option<pid_ctl::app::StateStoreError>,
     session: &ControllerSession,
     state_path: Option<&std::path::PathBuf>,
@@ -489,7 +500,7 @@ fn handle_dt_skip_state_write(
 }
 
 /// Emits a state write failure — escalated warning if threshold reached, plain log otherwise.
-fn emit_state_write_failure(
+pub(crate) fn emit_state_write_failure(
     session: &ControllerSession,
     state_path: Option<&std::path::PathBuf>,
     log_file: &mut Option<std::fs::File>,
@@ -536,6 +547,29 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
     let pv_source = common.pv_source.ok_or_else(|| {
         CliError::config("loop requires a PV source (--pv-file, --pv-cmd, or --pv-stdin)")
     })?;
+
+    if common.tune {
+        if matches!(common.output_format, OutputFormat::Json) {
+            return Err(CliError::config(
+                "--tune and --format json are incompatible",
+            ));
+        }
+        if common.quiet {
+            return Err(CliError::config(
+                "--tune and --quiet are incompatible — tune requires a TTY",
+            ));
+        }
+        if matches!(pv_source, PvSourceConfig::Stdin) {
+            return Err(CliError::config(
+                "--tune cannot be used with --pv-stdin — stdin is used for the tuning dashboard",
+            ));
+        }
+        if !io::stdout().is_terminal() {
+            return Err(CliError::config(
+                "--tune requires a TTY; use --format json for non-interactive output",
+            ));
+        }
+    }
 
     // CV sink is required unless --dry-run is active.
     if common.cv_sink.is_none() && !common.dry_run {
@@ -600,6 +634,18 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         verify_cv: common.verify_cv,
         state_write_interval,
         state_fail_after: common.state_fail_after.unwrap_or(10),
+        tune: common.tune,
+        tune_history: common.tune_history.unwrap_or(60).max(1),
+        tune_step_kp: common.tune_step_kp.unwrap_or(0.1),
+        tune_step_ki: common.tune_step_ki.unwrap_or(0.01),
+        tune_step_kd: common.tune_step_kd.unwrap_or(0.05),
+        tune_step_sp: common.tune_step_sp.unwrap_or(0.1),
+        units: common.units,
+        quiet: common.quiet,
+        explicit_max_dt: common.explicit_max_dt,
+        explicit_min_dt: common.explicit_min_dt,
+        explicit_pv_stdin_timeout: common.explicit_pv_stdin_timeout,
+        explicit_state_write_interval: common.explicit_state_write_interval,
     })
 }
 
@@ -617,7 +663,7 @@ fn apply_verify_cv(cv_sink: &mut CvSinkConfig, verify: bool) {
     }
 }
 
-fn build_pv_source(
+pub(crate) fn build_pv_source(
     source: &PvSourceConfig,
     cmd_timeout: Duration,
     pv_stdin_timeout: Duration,
@@ -634,7 +680,7 @@ fn build_pv_source(
 ///
 /// - Suffix `ms` → milliseconds
 /// - Suffix `s` or no suffix → seconds (supports fractional)
-fn parse_duration_flag(flag: &str, value: &str) -> Result<Duration, CliError> {
+pub(crate) fn parse_duration_flag(flag: &str, value: &str) -> Result<Duration, CliError> {
     if let Some(ms_str) = value.strip_suffix("ms") {
         let ms = ms_str.parse::<f64>().map_err(|_| {
             CliError::config(format!(
@@ -767,7 +813,7 @@ fn parse_state_flag(args: &[String], command: &str) -> Result<PathBuf, CliError>
     Err(CliError::config(format!("{command} requires --state")))
 }
 
-fn build_cv_sink(
+pub(crate) fn build_cv_sink(
     cv_sink: &CvSinkConfig,
     precision: usize,
     default_cmd_timeout: Duration,
@@ -791,7 +837,7 @@ fn build_cv_sink(
     }
 }
 
-fn print_iteration_json(record: &pid_ctl::app::IterationRecord) -> Result<(), CliError> {
+pub(crate) fn print_iteration_json(record: &pid_ctl::app::IterationRecord) -> Result<(), CliError> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, record)
@@ -970,6 +1016,18 @@ fn parse_common_args(args: &[String], command_kind: CommandKind) -> Result<Commo
 
     let mut index = 0;
     while index < args.len() {
+        // `handle_loop_only_option` only runs for `loop`; catch tuning flags early for other modes.
+        if args[index].starts_with("--tune")
+            && matches!(command_kind, CommandKind::Once | CommandKind::Pipe)
+        {
+            let msg = if matches!(command_kind, CommandKind::Once) {
+                "--tune requires loop"
+            } else {
+                "--tune is unavailable with pipe — pipe is a pure stdin→stdout transformer in v1"
+            };
+            return Err(CliError::config(msg.to_string()));
+        }
+
         if handle_pid_option(args[index].as_str(), args, &mut index, &mut parsed)? {
             index += 1;
             continue;
@@ -998,6 +1056,13 @@ fn parse_common_args(args: &[String], command_kind: CommandKind) -> Result<Commo
             command_kind,
             &mut parsed,
         )? {
+            index += 1;
+            continue;
+        }
+
+        if matches!(command_kind, CommandKind::Loop)
+            && handle_loop_only_option(args[index].as_str(), args, &mut index, &mut parsed)?
+        {
             index += 1;
             continue;
         }
@@ -1038,6 +1103,42 @@ fn parse_common_args(args: &[String], command_kind: CommandKind) -> Result<Commo
     }
 
     Ok(parsed)
+}
+
+fn handle_loop_only_option(
+    flag: &str,
+    args: &[String],
+    index: &mut usize,
+    parsed: &mut CommonArgs,
+) -> Result<bool, CliError> {
+    match flag {
+        "--tune" => {
+            parsed.tune = true;
+            Ok(true)
+        }
+        "--tune-history" => {
+            let n = parse_u32_flag("--tune-history", args, index)? as usize;
+            parsed.tune_history = Some(n.max(1));
+            Ok(true)
+        }
+        "--tune-step-kp" => {
+            parsed.tune_step_kp = Some(parse_f64_flag("--tune-step-kp", args, index)?);
+            Ok(true)
+        }
+        "--tune-step-ki" => {
+            parsed.tune_step_ki = Some(parse_f64_flag("--tune-step-ki", args, index)?);
+            Ok(true)
+        }
+        "--tune-step-kd" => {
+            parsed.tune_step_kd = Some(parse_f64_flag("--tune-step-kd", args, index)?);
+            Ok(true)
+        }
+        "--tune-step-sp" => {
+            parsed.tune_step_sp = Some(parse_f64_flag("--tune-step-sp", args, index)?);
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn handle_pid_option(
@@ -1130,9 +1231,11 @@ fn handle_common_option(
         }
         "--min-dt" => {
             parsed.min_dt = Some(parse_f64_flag("--min-dt", args, index)?);
+            parsed.explicit_min_dt = true;
         }
         "--max-dt" => {
             parsed.max_dt = Some(parse_f64_flag("--max-dt", args, index)?);
+            parsed.explicit_max_dt = true;
         }
         "--log" => {
             parsed.log_path = Some(parse_path_flag("--log", args, index)?);
@@ -1141,6 +1244,13 @@ fn handle_common_option(
             let value = next_value("--state-write-interval", args, index)?;
             parsed.state_write_interval =
                 Some(parse_duration_flag("--state-write-interval", &value)?);
+            parsed.explicit_state_write_interval = true;
+        }
+        "--units" => {
+            parsed.units = Some(parse_string_flag("--units", args, index)?);
+        }
+        "--quiet" => {
+            parsed.quiet = true;
         }
         "--state-fail-after" => {
             parsed.state_fail_after = Some(parse_u32_flag("--state-fail-after", args, index)?);
@@ -1270,6 +1380,7 @@ fn handle_pv_option(
             }
             let value = next_value("--pv-stdin-timeout", args, index)?;
             parsed.pv_stdin_timeout = Some(parse_duration_flag("--pv-stdin-timeout", &value)?);
+            parsed.explicit_pv_stdin_timeout = true;
         }
         _ => return Ok(false),
     }
@@ -1360,7 +1471,7 @@ enum CommandKind {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum OutputFormat {
+pub(crate) enum OutputFormat {
     #[default]
     Text,
     Json,
@@ -1413,6 +1524,19 @@ struct CommonArgs {
     verify_cv: bool,
     state_write_interval: Option<Duration>,
     state_fail_after: Option<u32>,
+    /// Loop + dashboard only (`--tune`, `--tune-history`, `--tune-step-*`).
+    tune: bool,
+    tune_history: Option<usize>,
+    tune_step_kp: Option<f64>,
+    tune_step_ki: Option<f64>,
+    tune_step_kd: Option<f64>,
+    tune_step_sp: Option<f64>,
+    units: Option<String>,
+    quiet: bool,
+    explicit_max_dt: bool,
+    explicit_min_dt: bool,
+    explicit_pv_stdin_timeout: bool,
+    explicit_state_write_interval: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1438,7 +1562,7 @@ struct OnceArgs {
 
 /// Which PV source was specified on the CLI.
 #[derive(Clone, Debug, PartialEq)]
-enum PvSourceConfig {
+pub(crate) enum PvSourceConfig {
     Literal(f64),
     File(PathBuf),
     Cmd(String),
@@ -1489,31 +1613,43 @@ impl PipeArgs {
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
-struct LoopArgs {
-    interval: Duration,
-    pv_source: PvSourceConfig,
-    cv_sink: Option<CvSinkConfig>,
-    pid_config: PidConfig,
-    state_path: Option<PathBuf>,
-    name: Option<String>,
+pub(crate) struct LoopArgs {
+    pub(crate) interval: Duration,
+    pub(crate) pv_source: PvSourceConfig,
+    pub(crate) cv_sink: Option<CvSinkConfig>,
+    pub(crate) pid_config: PidConfig,
+    pub(crate) state_path: Option<PathBuf>,
+    pub(crate) name: Option<String>,
     reset_accumulator: bool,
-    scale: f64,
-    cv_precision: usize,
-    output_format: OutputFormat,
-    cmd_timeout: Duration,
-    pv_cmd_timeout: Duration,
-    safe_cv: Option<f64>,
-    cv_fail_after: u32,
-    fail_after: Option<u32>,
-    min_dt: f64,
-    max_dt: f64,
-    dt_clamp: bool,
-    log_path: Option<PathBuf>,
-    dry_run: bool,
-    pv_stdin_timeout: Duration,
-    verify_cv: bool,
-    state_write_interval: Option<Duration>,
+    pub(crate) scale: f64,
+    pub(crate) cv_precision: usize,
+    pub(crate) output_format: OutputFormat,
+    pub(crate) cmd_timeout: Duration,
+    pub(crate) pv_cmd_timeout: Duration,
+    pub(crate) safe_cv: Option<f64>,
+    pub(crate) cv_fail_after: u32,
+    pub(crate) fail_after: Option<u32>,
+    pub(crate) min_dt: f64,
+    pub(crate) max_dt: f64,
+    pub(crate) dt_clamp: bool,
+    pub(crate) log_path: Option<PathBuf>,
+    pub(crate) dry_run: bool,
+    pub(crate) pv_stdin_timeout: Duration,
+    pub(crate) verify_cv: bool,
+    pub(crate) state_write_interval: Option<Duration>,
     state_fail_after: u32,
+    pub(crate) tune: bool,
+    pub(crate) tune_history: usize,
+    pub(crate) tune_step_kp: f64,
+    pub(crate) tune_step_ki: f64,
+    pub(crate) tune_step_kd: f64,
+    pub(crate) tune_step_sp: f64,
+    pub(crate) units: Option<String>,
+    pub(crate) quiet: bool,
+    pub(crate) explicit_max_dt: bool,
+    pub(crate) explicit_min_dt: bool,
+    pub(crate) explicit_pv_stdin_timeout: bool,
+    pub(crate) explicit_state_write_interval: bool,
 }
 
 impl LoopArgs {
@@ -1530,7 +1666,7 @@ impl LoopArgs {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum CvSinkConfig {
+pub(crate) enum CvSinkConfig {
     Stdout,
     File {
         path: PathBuf,
@@ -1543,7 +1679,7 @@ enum CvSinkConfig {
 }
 
 #[derive(Debug)]
-struct CliError {
+pub(crate) struct CliError {
     exit_code: i32,
     message: String,
 }

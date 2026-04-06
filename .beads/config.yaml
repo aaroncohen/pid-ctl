@@ -23,6 +23,11 @@
 # Default actor for audit trails (overridden by BD_ACTOR or --actor)
 # actor: ""
 
+dolt:
+  host: 127.0.0.1
+  port: 53377
+  user: root
+
 # Export events (audit trail) to .beads/events.jsonl on each flush/sync
 # When enabled, new events are appended incrementally using a high-water mark.
 # Use 'bd export --events' to trigger manually regardless of this setting.

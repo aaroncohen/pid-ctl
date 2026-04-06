@@ -294,3 +294,69 @@ pub fn emit_state_write_escalated(
         &StateWriteEscalatedEvent::new(path, error, consecutive_failures),
     );
 }
+
+#[derive(Serialize)]
+pub struct GainsChangedEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub kp: f64,
+    pub ki: f64,
+    pub kd: f64,
+    pub sp: f64,
+    pub iter: u64,
+    pub source: &'static str,
+}
+
+impl GainsChangedEvent {
+    #[must_use]
+    pub fn new(kp: f64, ki: f64, kd: f64, sp: f64, iter: u64, source: &'static str) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "gains_changed",
+            kp,
+            ki,
+            kd,
+            sp,
+            iter,
+            source,
+        }
+    }
+}
+
+pub fn emit_gains_changed(
+    log: &mut Option<std::fs::File>,
+    kp: f64,
+    ki: f64,
+    kd: f64,
+    sp: f64,
+    iter: u64,
+    source: &'static str,
+) {
+    emit_line(log, &GainsChangedEvent::new(kp, ki, kd, sp, iter, source));
+}
+
+#[derive(Serialize)]
+pub struct GainsSavedEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub iter: u64,
+}
+
+impl GainsSavedEvent {
+    #[must_use]
+    pub fn new(iter: u64) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "gains_saved",
+            iter,
+        }
+    }
+}
+
+pub fn emit_gains_saved(log: &mut Option<std::fs::File>, iter: u64) {
+    emit_line(log, &GainsSavedEvent::new(iter));
+}

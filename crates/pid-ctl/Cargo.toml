@@ -13,6 +13,8 @@ fs2.workspace = true
 ctrlc.workspace = true
 wait-timeout.workspace = true
 time.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
