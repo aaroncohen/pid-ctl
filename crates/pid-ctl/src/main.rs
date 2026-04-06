@@ -172,6 +172,7 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
@@ -203,6 +204,7 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
     let mut next_deadline = Instant::now() + interval;
     let mut last_tick = Instant::now();
     let mut cv_fail_count: u32 = 0;
+    let mut pv_fail_count: u32 = 0;
 
     loop {
         // Check shutdown flag at top of each iteration.
@@ -268,11 +270,28 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
 
         // Read PV.
         let raw_pv = match pv_source.read_pv() {
-            Ok(pv) => pv,
+            Ok(pv) => {
+                pv_fail_count = 0;
+                pv
+            }
             Err(error) => {
+                pv_fail_count += 1;
                 eprintln!("PV read failed: {error}");
                 json_events::emit_pv_read_failure(&mut log_file, error.to_string(), args.safe_cv);
                 write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
+                if let Some(limit) = args.fail_after
+                    && pv_fail_count >= limit
+                {
+                    json_events::emit_pv_fail_after_reached(
+                        &mut log_file,
+                        pv_fail_count,
+                        limit,
+                    );
+                    return Err(CliError::new(
+                        2,
+                        format!("exiting after {pv_fail_count} consecutive PV read failures"),
+                    ));
+                }
                 continue;
             }
         };
@@ -526,6 +545,7 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         cmd_timeout: common.cmd_timeout.unwrap_or(Duration::from_secs(5)),
         safe_cv: common.safe_cv,
         cv_fail_after: common.cv_fail_after.unwrap_or(10),
+        fail_after: common.fail_after,
         min_dt: common.min_dt.unwrap_or(0.01),
         max_dt: common.max_dt.unwrap_or(max_dt_default),
         dt_clamp: common.dt_clamp,
@@ -1041,6 +1061,9 @@ fn handle_common_option(
         "--cv-fail-after" => {
             parsed.cv_fail_after = Some(parse_u32_flag("--cv-fail-after", args, index)?);
         }
+        "--fail-after" => {
+            parsed.fail_after = Some(parse_u32_flag("--fail-after", args, index)?);
+        }
         "--min-dt" => {
             parsed.min_dt = Some(parse_f64_flag("--min-dt", args, index)?);
         }
@@ -1308,6 +1331,7 @@ struct CommonArgs {
     loop_interval: Option<Duration>,
     safe_cv: Option<f64>,
     cv_fail_after: Option<u32>,
+    fail_after: Option<u32>,
     min_dt: Option<f64>,
     max_dt: Option<f64>,
     log_path: Option<PathBuf>,
@@ -1396,6 +1420,7 @@ struct LoopArgs {
     cmd_timeout: Duration,
     safe_cv: Option<f64>,
     cv_fail_after: u32,
+    fail_after: Option<u32>,
     min_dt: f64,
     max_dt: f64,
     dt_clamp: bool,

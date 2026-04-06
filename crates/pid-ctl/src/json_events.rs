@@ -225,3 +225,36 @@ pub fn emit_d_term_skipped(
 ) {
     emit_line(log, &DTermSkippedEvent::new(reason_str(reason), iter));
 }
+
+#[derive(Serialize)]
+pub struct PvFailAfterReachedEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub consecutive_failures: u32,
+    pub limit: u32,
+}
+
+impl PvFailAfterReachedEvent {
+    #[must_use]
+    pub fn new(consecutive_failures: u32, limit: u32) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "pv_fail_after_reached",
+            consecutive_failures,
+            limit,
+        }
+    }
+}
+
+pub fn emit_pv_fail_after_reached(
+    log: &mut Option<std::fs::File>,
+    consecutive_failures: u32,
+    limit: u32,
+) {
+    emit_line(
+        log,
+        &PvFailAfterReachedEvent::new(consecutive_failures, limit),
+    );
+}

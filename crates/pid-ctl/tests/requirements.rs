@@ -16,6 +16,8 @@ mod req_cv_sink;
 mod req_cv_write_policy;
 #[path = "req/req_dry_run.rs"]
 mod req_dry_run;
+#[path = "req/req_fail_after.rs"]
+mod req_fail_after;
 #[path = "req/req_flag_precedence.rs"]
 mod req_flag_precedence;
 #[path = "req/req_flag_validation.rs"]
