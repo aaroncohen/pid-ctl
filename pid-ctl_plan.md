@@ -215,6 +215,8 @@ pid-ctl  controller=still  interval=5s                      iter 142  11m50s
 
 **Tick cadence:** While waiting for the next PID tick, the TUI does not issue a full redraw on every keyboard poll (which would otherwise be up to ~20 Hz with a 50 ms poll cap). Redraws are throttled so terminal work does not dominate wall time; the dashboard still repaints immediately on input or resize, and refreshes more often in the last ~120 ms before a tick so the countdown stays legible. That keeps measured `dt` between tick starts closer to `--interval`, so tuning reflects a production-like loop cadence better than if the UI constantly stole time from the controller path.
 
+**Structured events vs stderr:** NDJSON event records (`gains_changed`, `gains_saved`, `dt_skipped`, etc.) are not printed to stderr while the dashboard is running — stderr is not in the alternate-screen buffer, so those lines would corrupt the layout. With `--log <path>`, events still append to the log file as usual.
+
 #### Keyboard Bindings
 
 | Key | Action |

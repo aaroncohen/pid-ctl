@@ -208,6 +208,7 @@ const TUNE_IDLE_DRAW_DEADLINE_NEAR: Duration = Duration::from_millis(120);
 
 /// Runs the interactive tuning dashboard until the operator quits or a fatal loop error occurs.
 pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
+    let _suppress_structured_json_stderr = json_events::suppress_structured_json_stderr();
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|e| CliError::config(e.to_string()))?;
     let cfg0 = session.config().clone();

@@ -1,17 +1,44 @@
 //! Structured NDJSON event lines (stderr + optional `--log` file).
+//!
+//! [`suppress_structured_json_stderr`] disables stderr for `emit_*` only (not other `eprintln!`),
+//! so `loop --tune` can use an alternate-screen TUI on stdout without JSON lines corrupting the
+//! display — events still append to `--log` when set.
 
 use crate::app::{STATE_SCHEMA_VERSION, now_iso8601};
 use serde::Serialize;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static SUPPRESS_STRUCTURED_JSON_STDERR: AtomicBool = AtomicBool::new(false);
 
 fn emit_line(log: &mut Option<std::fs::File>, record: &impl Serialize) {
     let Ok(json) = serde_json::to_string(record) else {
         return;
     };
-    eprintln!("{json}");
+    if !SUPPRESS_STRUCTURED_JSON_STDERR.load(Ordering::Relaxed) {
+        eprintln!("{json}");
+    }
     if let Some(f) = log {
         let _ = writeln!(f, "{json}");
+    }
+}
+
+/// While held, structured NDJSON events are written to `--log` only, not stderr.
+///
+/// Used by `loop --tune` so `emit_*` lines do not interleave with the ratatui display (stderr is not
+/// in the alternate screen buffer).
+#[must_use]
+pub fn suppress_structured_json_stderr() -> StructuredJsonStderrGuard {
+    SUPPRESS_STRUCTURED_JSON_STDERR.store(true, Ordering::Relaxed);
+    StructuredJsonStderrGuard
+}
+
+pub struct StructuredJsonStderrGuard;
+
+impl Drop for StructuredJsonStderrGuard {
+    fn drop(&mut self) {
+        SUPPRESS_STRUCTURED_JSON_STDERR.store(false, Ordering::Relaxed);
     }
 }
 
@@ -359,4 +386,22 @@ impl GainsSavedEvent {
 
 pub fn emit_gains_saved(log: &mut Option<std::fs::File>, iter: u64) {
     emit_line(log, &GainsSavedEvent::new(iter));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Seek, SeekFrom};
+
+    #[test]
+    fn suppress_guard_still_appends_to_log() {
+        let mut log = Some(tempfile::tempfile().unwrap());
+        let _guard = suppress_structured_json_stderr();
+        emit_gains_changed(&mut log, 1.0, 0.0, 0.0, 1.0, 1, "tui");
+        let mut f = log.unwrap();
+        let mut s = String::new();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.read_to_string(&mut s).unwrap();
+        assert!(s.contains("\"event\":\"gains_changed\""), "{s:?}");
+    }
 }
