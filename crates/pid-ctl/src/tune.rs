@@ -226,6 +226,16 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
         .map(|cfg| build_cv_sink(cfg, args.cv_precision, args.cmd_timeout));
     let mut log_file = open_log_optional(args.log_path.as_deref())?;
 
+    // Bind socket listener when --socket is set.
+    let socket_listener = if let Some(ref path) = args.socket_path {
+        Some(
+            pid_ctl::socket::SocketListener::bind(path, args.socket_mode)
+                .map_err(|e| CliError::new(3, format!("socket: {e}")))?,
+        )
+    } else {
+        None
+    };
+
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = Arc::clone(&shutdown);
     ctrlc::set_handler(move || {
@@ -293,6 +303,26 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
                         }
                     }
                     _ => {}
+                }
+            }
+
+            // Service socket connections between ticks.
+            if let Some(ref listener) = socket_listener {
+                for _ in 0..10 {
+                    match listener.try_service_one(|req| {
+                        let (resp, effect) =
+                            crate::handle_socket_request(&req, &mut session, &mut args, &mut log_file);
+                        match effect {
+                            crate::SocketSideEffect::Hold => ui.hold = true,
+                            crate::SocketSideEffect::Resume => ui.hold = false,
+                            crate::SocketSideEffect::IntervalChanged
+                            | crate::SocketSideEffect::None => {}
+                        }
+                        resp
+                    }) {
+                        Ok(Some(())) => {},
+                        _ => break,
+                    }
                 }
             }
 

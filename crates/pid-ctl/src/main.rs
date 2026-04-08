@@ -48,11 +48,11 @@ fn run(args: &[String], full_argv: &[String]) -> Result<(), CliError> {
             run_pipe(&parsed)
         }
         "loop" => {
-            let parsed = parse_loop(rest)?;
+            let mut parsed = parse_loop(rest)?;
             if parsed.tune {
                 tune::run(parsed, full_argv.to_vec())
             } else {
-                run_loop(&parsed)
+                run_loop(&mut parsed)
             }
         }
         "status" => {
@@ -173,7 +173,7 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
+fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
     let mut pv_source =
@@ -192,6 +192,21 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
 
     let mut log_file = open_log_optional(args.log_path.as_deref())?;
 
+    // Bind socket listener when --socket is set.
+    let socket_listener = if let Some(ref path) = args.socket_path {
+        Some(
+            pid_ctl::socket::SocketListener::bind(path, args.socket_mode).map_err(|e| match e {
+                pid_ctl::socket::SocketError::AlreadyRunning => CliError::new(
+                    3,
+                    format!("socket {}: another instance is running", path.display()),
+                ),
+                other => CliError::new(1, format!("socket: {other}")),
+            })?,
+        )
+    } else {
+        None
+    };
+
     // Set up SIGTERM/SIGINT shutdown flag.
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = Arc::clone(&shutdown);
@@ -200,12 +215,11 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
     })
     .expect("signal handler");
 
-    let interval = args.interval;
-    let interval_secs = interval.as_secs_f64();
-    let mut next_deadline = Instant::now() + interval;
+    let mut next_deadline = Instant::now() + args.interval;
     let mut last_tick = Instant::now();
     let mut cv_fail_count: u32 = 0;
     let mut pv_fail_count: u32 = 0;
+    let mut hold = false;
 
     loop {
         // Check shutdown flag at top of each iteration.
@@ -215,10 +229,22 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
             break;
         }
 
-        // Sleep until next deadline.
+        // Sleep until next deadline, servicing socket if active.
         let now = Instant::now();
         if now < next_deadline {
-            std::thread::sleep(next_deadline - now);
+            if let Some(ref listener) = socket_listener {
+                sleep_with_socket(
+                    next_deadline,
+                    listener,
+                    &mut session,
+                    args,
+                    &mut hold,
+                    &shutdown,
+                    &mut log_file,
+                );
+            } else {
+                std::thread::sleep(next_deadline - now);
+            }
         }
 
         // Check shutdown again after sleeping (signal may have arrived during sleep).
@@ -230,13 +256,19 @@ fn run_loop(args: &LoopArgs) -> Result<(), CliError> {
 
         let now = Instant::now();
         let tick_deadline = next_deadline;
-        next_deadline = next_deadline_after_tick(tick_deadline, interval, now);
+        next_deadline = next_deadline_after_tick(tick_deadline, args.interval, now);
+
+        // Hold mode: skip PID computation, keep servicing socket.
+        if hold {
+            continue;
+        }
 
         // Measure dt — wall-clock elapsed since last PID step (actual time between ticks).
         let raw_dt = now.duration_since(last_tick).as_secs_f64();
         last_tick = now;
 
         // Interval slip (plan: Reliability §10 — tick longer than configured `--interval`).
+        let interval_secs = args.interval.as_secs_f64();
         if raw_dt > interval_secs {
             eprintln!(
                 "interval slip: tick took {:.0}ms (interval: {:.0}ms)",
@@ -511,6 +543,185 @@ pub(crate) fn apply_runtime_interval(
     }
     session.set_flush_interval(args.state_write_interval);
     Ok(())
+}
+
+/// Side effects that a socket command may request the loop to apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SocketSideEffect {
+    None,
+    Hold,
+    Resume,
+    IntervalChanged,
+}
+
+/// Dispatches a socket [`Request`] against the live controller session and
+/// returns a JSON [`Response`] plus any side effect for the loop to apply.
+pub(crate) fn handle_socket_request(
+    req: &pid_ctl::socket::Request,
+    session: &mut ControllerSession,
+    args: &mut LoopArgs,
+    log_file: &mut Option<std::fs::File>,
+) -> (pid_ctl::socket::Response, SocketSideEffect) {
+    use pid_ctl::socket::{Request, Response};
+
+    match req {
+        Request::Status => {
+            let cfg = session.config();
+            (
+                Response::Status {
+                    ok: true,
+                    iter: session.iter(),
+                    pv: session.last_pv().unwrap_or(0.0),
+                    sp: cfg.setpoint,
+                    err: session.last_error().unwrap_or(0.0),
+                    kp: cfg.kp,
+                    ki: cfg.ki,
+                    kd: cfg.kd,
+                    cv: session.last_applied_cv().unwrap_or(0.0),
+                    i_acc: session.i_acc(),
+                },
+                SocketSideEffect::None,
+            )
+        }
+        Request::Set { param, value } => handle_socket_set(param, *value, session, args, log_file),
+        Request::Reset => {
+            let i_acc_before = session.i_acc();
+            session.reset_integral();
+            json_events::emit_gains_changed(
+                log_file,
+                session.config().kp,
+                session.config().ki,
+                session.config().kd,
+                session.config().setpoint,
+                session.iter(),
+                "socket",
+            );
+            (
+                Response::Reset {
+                    ok: true,
+                    i_acc_before,
+                },
+                SocketSideEffect::None,
+            )
+        }
+        Request::Hold => (Response::Ack { ok: true }, SocketSideEffect::Hold),
+        Request::Resume => (Response::Ack { ok: true }, SocketSideEffect::Resume),
+        Request::Save => {
+            if let Some(err) = session.force_flush() {
+                (
+                    Response::ErrorUnknownCommand {
+                        ok: false,
+                        error: format!("save failed: {err}"),
+                        available: vec![],
+                    },
+                    SocketSideEffect::None,
+                )
+            } else {
+                (Response::Ack { ok: true }, SocketSideEffect::None)
+            }
+        }
+    }
+}
+
+fn handle_socket_set(
+    param: &str,
+    value: f64,
+    session: &mut ControllerSession,
+    args: &mut LoopArgs,
+    log_file: &mut Option<std::fs::File>,
+) -> (pid_ctl::socket::Response, SocketSideEffect) {
+    use pid_ctl::socket::Response;
+
+    let settable = || {
+        vec![
+            String::from("kp"),
+            String::from("ki"),
+            String::from("kd"),
+            String::from("sp"),
+            String::from("interval"),
+        ]
+    };
+
+    match param {
+        "kp" => {
+            let old = session.config().kp;
+            session.set_gains(value, session.config().ki, session.config().kd);
+            json_events::emit_gains_changed(log_file, value, session.config().ki, session.config().kd, session.config().setpoint, session.iter(), "socket");
+            (Response::Set { ok: true, param: String::from("kp"), old, new: value }, SocketSideEffect::None)
+        }
+        "ki" => {
+            let old = session.config().ki;
+            session.set_gains(session.config().kp, value, session.config().kd);
+            json_events::emit_gains_changed(log_file, session.config().kp, value, session.config().kd, session.config().setpoint, session.iter(), "socket");
+            (Response::Set { ok: true, param: String::from("ki"), old, new: value }, SocketSideEffect::None)
+        }
+        "kd" => {
+            let old = session.config().kd;
+            session.set_gains(session.config().kp, session.config().ki, value);
+            json_events::emit_gains_changed(log_file, session.config().kp, session.config().ki, value, session.config().setpoint, session.iter(), "socket");
+            (Response::Set { ok: true, param: String::from("kd"), old, new: value }, SocketSideEffect::None)
+        }
+        "sp" => {
+            let old = session.config().setpoint;
+            session.set_setpoint(value);
+            json_events::emit_gains_changed(log_file, session.config().kp, session.config().ki, session.config().kd, value, session.iter(), "socket");
+            (Response::Set { ok: true, param: String::from("sp"), old, new: value }, SocketSideEffect::None)
+        }
+        "interval" => {
+            let old = args.interval.as_secs_f64();
+            let new_interval = Duration::from_secs_f64(value);
+            if let Err(e) = apply_runtime_interval(session, args, new_interval) {
+                return (
+                    Response::ErrorUnknownCommand { ok: false, error: format!("interval change failed: {e}"), available: vec![] },
+                    SocketSideEffect::None,
+                );
+            }
+            (Response::Set { ok: true, param: String::from("interval"), old, new: value }, SocketSideEffect::IntervalChanged)
+        }
+        _ => (
+            Response::ErrorUnknownParam {
+                ok: false,
+                error: format!("unknown parameter: {param}"),
+                settable: settable(),
+            },
+            SocketSideEffect::None,
+        ),
+    }
+}
+
+/// Sleeps until `until` in 50ms chunks, servicing socket connections between chunks.
+fn sleep_with_socket(
+    until: Instant,
+    listener: &pid_ctl::socket::SocketListener,
+    session: &mut ControllerSession,
+    args: &mut LoopArgs,
+    hold: &mut bool,
+    shutdown: &AtomicBool,
+    log_file: &mut Option<std::fs::File>,
+) {
+    loop {
+        let now = Instant::now();
+        if now >= until || shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        let chunk = (until - now).min(Duration::from_millis(50));
+        std::thread::sleep(chunk);
+
+        for _ in 0..10 {
+            match listener.try_service_one(|req| {
+                let (resp, effect) = handle_socket_request(&req, session, args, log_file);
+                match effect {
+                    SocketSideEffect::Hold => *hold = true,
+                    SocketSideEffect::Resume => *hold = false,
+                    SocketSideEffect::IntervalChanged | SocketSideEffect::None => {}
+                }
+                resp
+            }) {
+                Ok(Some(())) => {},
+                _ => break,
+            }
+        }
+    }
 }
 
 /// Handles a state write failure that occurred during a dt-skip, applying escalation logic.
@@ -893,15 +1104,42 @@ fn parse_status_flags(args: &[String]) -> Result<StatusFlags, CliError> {
 }
 
 fn run_status_dispatch(flags: &StatusFlags) -> Result<(), CliError> {
-    // Socket client support will be added in the integration bead.
-    // For now, use state file path if available.
-    if let Some(ref state_path) = flags.state_path {
-        return run_status(state_path);
+    // Try socket first if provided.
+    if let Some(ref socket_path) = flags.socket_path {
+        match pid_ctl::socket::client_request(socket_path, &pid_ctl::socket::Request::Status) {
+            Ok(response) => {
+                let json = serde_json::to_string(&response)
+                    .map_err(|e| CliError::new(1, e.to_string()))?;
+                let stdout = io::stdout();
+                let mut handle = stdout.lock();
+                writeln!(handle, "{json}")
+                    .map_err(|e| CliError::new(1, format!("stdout write failed: {e}")))?;
+                return Ok(());
+            }
+            Err(pid_ctl::socket::SocketError::Io(ref e))
+                if e.kind() == io::ErrorKind::ConnectionRefused =>
+            {
+                if flags.state_path.is_none() {
+                    return Err(CliError::new(
+                        1,
+                        format!(
+                            "socket connection refused at {} (no --state fallback)",
+                            socket_path.display()
+                        ),
+                    ));
+                }
+                eprintln!("socket connection refused, falling back to state file");
+            }
+            Err(e) => return Err(CliError::new(1, format!("socket: {e}"))),
+        }
     }
-    Err(CliError::new(
-        1,
-        "status --socket requires a running loop (not yet implemented)",
-    ))
+
+    // Fall back to state file.
+    if let Some(ref state_path) = flags.state_path {
+        run_status(state_path)
+    } else {
+        Err(CliError::config("status requires --state or --socket"))
+    }
 }
 
 pub(crate) fn build_cv_sink(
