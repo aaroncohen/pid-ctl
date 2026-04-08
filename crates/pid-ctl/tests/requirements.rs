@@ -44,6 +44,8 @@ mod req_state_schema;
 mod req_state_write_interval;
 #[path = "req/req_stdout_contract.rs"]
 mod req_stdout_contract;
+#[path = "req/req_socket.rs"]
+mod req_socket;
 #[path = "req/req_tune.rs"]
 mod req_tune;
 #[path = "req/req_tune_pty.rs"]
