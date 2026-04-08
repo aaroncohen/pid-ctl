@@ -34,7 +34,7 @@ fn main() {
 fn run(args: &[String], full_argv: &[String]) -> Result<(), CliError> {
     let Some((command, rest)) = args.split_first() else {
         return Err(CliError::config(
-            "usage: pid-ctl <once|pipe|status|purge|init> [OPTIONS]",
+            "usage: pid-ctl <once|loop|pipe|status|purge|init> [OPTIONS]",
         ));
     };
 
@@ -56,8 +56,8 @@ fn run(args: &[String], full_argv: &[String]) -> Result<(), CliError> {
             }
         }
         "status" => {
-            let state_path = parse_state_flag(rest, "status")?;
-            run_status(&state_path)
+            let flags = parse_status_flags(rest)?;
+            run_status_dispatch(&flags)
         }
         "purge" => {
             let state_path = parse_state_flag(rest, "purge")?;
@@ -489,6 +489,30 @@ pub(crate) fn write_safe_cv(
     }
 }
 
+/// Applies a new loop interval at runtime, updating derived defaults (`max_dt`,
+/// `pv_stdin_timeout`, `state_write_interval`) unless the user set them explicitly.
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn apply_runtime_interval(
+    session: &mut ControllerSession,
+    args: &mut LoopArgs,
+    new_interval: Duration,
+) -> Result<(), CliError> {
+    args.interval = new_interval;
+    let s = new_interval.as_secs_f64();
+    if !args.explicit_max_dt {
+        args.max_dt = (s * 3.0_f64).clamp(0.01, 60.0);
+    }
+    if !args.explicit_pv_stdin_timeout {
+        args.pv_stdin_timeout = new_interval;
+    }
+    if !args.explicit_state_write_interval {
+        let min_flush = Duration::from_millis(100);
+        args.state_write_interval = Some(new_interval.max(min_flush));
+    }
+    session.set_flush_interval(args.state_write_interval);
+    Ok(())
+}
+
 /// Handles a state write failure that occurred during a dt-skip, applying escalation logic.
 pub(crate) fn handle_dt_skip_state_write(
     err: Option<pid_ctl::app::StateStoreError>,
@@ -649,6 +673,8 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         explicit_min_dt: common.explicit_min_dt,
         explicit_pv_stdin_timeout: common.explicit_pv_stdin_timeout,
         explicit_state_write_interval: common.explicit_state_write_interval,
+        socket_path: common.socket_path,
+        socket_mode: common.socket_mode.unwrap_or(0o600),
     })
 }
 
@@ -814,6 +840,68 @@ fn parse_state_flag(args: &[String], command: &str) -> Result<PathBuf, CliError>
     }
 
     Err(CliError::config(format!("{command} requires --state")))
+}
+
+#[allow(dead_code)] // socket_path will be used in the socket integration bead
+struct StatusFlags {
+    state_path: Option<PathBuf>,
+    socket_path: Option<PathBuf>,
+}
+
+fn parse_status_flags(args: &[String]) -> Result<StatusFlags, CliError> {
+    let mut state_path = None;
+    let mut socket_path = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--state" => {
+                i += 1;
+                let val = args
+                    .get(i)
+                    .ok_or_else(|| CliError::config("--state requires a value"))?;
+                state_path = Some(PathBuf::from(val));
+            }
+            "--socket" => {
+                i += 1;
+                let val = args
+                    .get(i)
+                    .ok_or_else(|| CliError::config("--socket requires a path"))?;
+                socket_path = Some(PathBuf::from(val));
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::config(format!(
+                    "status: unrecognized option `{other}`"
+                )));
+            }
+            other => {
+                return Err(CliError::config(format!(
+                    "status: unexpected argument `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    if state_path.is_none() && socket_path.is_none() {
+        return Err(CliError::config(
+            "status requires --state or --socket (or both)",
+        ));
+    }
+    Ok(StatusFlags {
+        state_path,
+        socket_path,
+    })
+}
+
+fn run_status_dispatch(flags: &StatusFlags) -> Result<(), CliError> {
+    // Socket client support will be added in the integration bead.
+    // For now, use state file path if available.
+    if let Some(ref state_path) = flags.state_path {
+        return run_status(state_path);
+    }
+    Err(CliError::new(
+        1,
+        "status --socket requires a running loop (not yet implemented)",
+    ))
 }
 
 pub(crate) fn build_cv_sink(
@@ -1138,6 +1226,18 @@ fn handle_loop_only_option(
         }
         "--tune-step-sp" => {
             parsed.tune_step_sp = Some(parse_f64_flag("--tune-step-sp", args, index)?);
+            Ok(true)
+        }
+        "--socket" => {
+            parsed.socket_path = Some(parse_path_flag("--socket", args, index)?);
+            Ok(true)
+        }
+        "--socket-mode" => {
+            let val = next_value("--socket-mode", args, index)?;
+            let mode = u32::from_str_radix(&val, 8).map_err(|_| {
+                CliError::config("--socket-mode expects an octal value like 0600 or 0660")
+            })?;
+            parsed.socket_mode = Some(mode);
             Ok(true)
         }
         _ => Ok(false),
@@ -1540,6 +1640,8 @@ struct CommonArgs {
     explicit_min_dt: bool,
     explicit_pv_stdin_timeout: bool,
     explicit_state_write_interval: bool,
+    socket_path: Option<PathBuf>,
+    socket_mode: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1653,6 +1755,8 @@ pub(crate) struct LoopArgs {
     pub(crate) explicit_min_dt: bool,
     pub(crate) explicit_pv_stdin_timeout: bool,
     pub(crate) explicit_state_write_interval: bool,
+    pub(crate) socket_path: Option<PathBuf>,
+    pub(crate) socket_mode: u32,
 }
 
 impl LoopArgs {

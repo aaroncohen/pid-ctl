@@ -123,6 +123,31 @@ impl ControllerSession {
         self.snapshot.last_cv
     }
 
+    /// Current iteration count from the snapshot.
+    #[must_use]
+    #[allow(clippy::iter_not_returning_iterator)]
+    pub const fn iter(&self) -> u64 {
+        self.snapshot.iter
+    }
+
+    /// Last filtered PV value used in PID computation.
+    #[must_use]
+    pub const fn last_pv(&self) -> Option<f64> {
+        self.snapshot.last_pv
+    }
+
+    /// Last computed error (setpoint - PV).
+    #[must_use]
+    pub const fn last_error(&self) -> Option<f64> {
+        self.snapshot.last_error
+    }
+
+    /// Current integral accumulator value.
+    #[must_use]
+    pub const fn i_acc(&self) -> f64 {
+        self.snapshot.i_acc
+    }
+
     /// Updates Kp/Ki/Kd in the live controller and mirrors into the in-memory snapshot for persistence.
     pub fn set_gains(&mut self, kp: f64, ki: f64, kd: f64) {
         self.controller.set_gains(kp, ki, kd);

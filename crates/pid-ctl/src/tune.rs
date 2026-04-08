@@ -848,7 +848,7 @@ fn run_command_line(
                 .next()
                 .ok_or_else(|| CliError::config("interval requires a duration"))?;
             let new_interval = crate::parse_duration_flag("--interval", dur_s)?;
-            apply_runtime_interval(session, args, new_interval)?;
+            crate::apply_runtime_interval(session, args, new_interval)?;
             Ok(())
         }
         "reset" => {
@@ -890,27 +890,6 @@ fn run_command_line(
             )))
         }
     }
-}
-
-fn apply_runtime_interval(
-    session: &mut ControllerSession,
-    args: &mut LoopArgs,
-    new_interval: Duration,
-) -> Result<(), CliError> {
-    args.interval = new_interval;
-    let s = new_interval.as_secs_f64();
-    if !args.explicit_max_dt {
-        args.max_dt = (s * 3.0_f64).min(60.0).max(0.01);
-    }
-    if !args.explicit_pv_stdin_timeout {
-        args.pv_stdin_timeout = new_interval;
-    }
-    if !args.explicit_state_write_interval {
-        let min_flush = Duration::from_millis(100);
-        args.state_write_interval = Some(new_interval.max(min_flush));
-    }
-    session.set_flush_interval(args.state_write_interval);
-    Ok(())
 }
 
 fn draw(
