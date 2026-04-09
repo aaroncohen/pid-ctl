@@ -17,8 +17,12 @@ fs2.workspace = true
 ctrlc.workspace = true
 wait-timeout.workspace = true
 time.workspace = true
-ratatui.workspace = true
-crossterm.workspace = true
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+
+[features]
+default = ["tui"]
+tui = ["dep:ratatui", "dep:crossterm"]
 
 [dev-dependencies]
 tempfile.workspace = true

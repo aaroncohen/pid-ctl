@@ -1,3 +1,4 @@
+#[cfg(feature = "tui")]
 mod tune;
 
 use pid_ctl::adapters::{
@@ -33,7 +34,7 @@ fn main() {
     process::exit(exit_code);
 }
 
-fn run(args: &[String], full_argv: &[String]) -> Result<(), CliError> {
+fn run(args: &[String], #[cfg_attr(not(feature = "tui"), allow(unused_variables))] full_argv: &[String]) -> Result<(), CliError> {
     let Some((command, rest)) = args.split_first() else {
         return Err(CliError::config(
             "usage: pid-ctl <once|loop|pipe|status|set|hold|resume|reset|save|purge|init> [OPTIONS]",
@@ -51,11 +52,17 @@ fn run(args: &[String], full_argv: &[String]) -> Result<(), CliError> {
         }
         "loop" => {
             let mut parsed = parse_loop(rest)?;
+            #[cfg(feature = "tui")]
             if parsed.tune {
-                tune::run(parsed, full_argv.to_vec())
-            } else {
-                run_loop(&mut parsed)
+                return tune::run(parsed, full_argv.to_vec());
             }
+            #[cfg(not(feature = "tui"))]
+            if parsed.tune {
+                return Err(CliError::config(
+                    "--tune requires the 'tui' feature (not compiled in)",
+                ));
+            }
+            run_loop(&mut parsed)
         }
         "status" => {
             let flags = parse_status_flags(rest)?;
