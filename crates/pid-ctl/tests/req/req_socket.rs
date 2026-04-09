@@ -605,3 +605,131 @@ fn test_socket_ready_event_emitted_on_stderr() {
         v["path"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// CLI subcommand tests (set, hold, resume, reset, save)
+// ---------------------------------------------------------------------------
+
+/// Run a `pid-ctl <subcommand>` with the given args and return its stdout + exit status.
+fn run_ctl_cmd(args: &[&str]) -> (String, std::process::ExitStatus) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_pid-ctl"))
+        .args(args)
+        .output()
+        .expect("spawn pid-ctl");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        output.status,
+    )
+}
+
+#[test]
+fn test_cli_set_kp() {
+    let dir = tempdir().expect("temp dir");
+    let pv_path = dir.path().join("pv.txt");
+    let cv_path = dir.path().join("cv.txt");
+    let socket_path = dir.path().join("ctrl.sock");
+
+    std::fs::write(&pv_path, "50.0\n").expect("write pv");
+    let _guard = spawn_loop(&pv_path, &cv_path, None, &socket_path, &[]);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(150));
+
+    let (out, status) = run_ctl_cmd(&[
+        "set",
+        "--socket",
+        socket_path.to_str().unwrap(),
+        "--param",
+        "kp",
+        "--value",
+        "2.5",
+    ]);
+    assert!(status.success(), "pid-ctl set exited non-zero: {out}");
+    let v: serde_json::Value = serde_json::from_str(out.trim()).expect("parse set output");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["param"], "kp");
+    assert_eq!(v["old"], 1.0);
+    assert_eq!(v["new"], 2.5);
+}
+
+#[test]
+fn test_cli_hold_and_resume() {
+    let dir = tempdir().expect("temp dir");
+    let pv_path = dir.path().join("pv.txt");
+    let cv_path = dir.path().join("cv.txt");
+    let socket_path = dir.path().join("ctrl.sock");
+
+    std::fs::write(&pv_path, "50.0\n").expect("write pv");
+    let _guard = spawn_loop(&pv_path, &cv_path, None, &socket_path, &[]);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(150));
+
+    let sock = socket_path.to_str().unwrap();
+
+    let (out, status) = run_ctl_cmd(&["hold", "--socket", sock]);
+    assert!(status.success(), "pid-ctl hold failed: {out}");
+    let v: serde_json::Value = serde_json::from_str(out.trim()).expect("parse hold output");
+    assert_eq!(v["ok"], true);
+
+    let (out, status) = run_ctl_cmd(&["resume", "--socket", sock]);
+    assert!(status.success(), "pid-ctl resume failed: {out}");
+    let v: serde_json::Value = serde_json::from_str(out.trim()).expect("parse resume output");
+    assert_eq!(v["ok"], true);
+}
+
+#[test]
+fn test_cli_reset() {
+    let dir = tempdir().expect("temp dir");
+    let pv_path = dir.path().join("pv.txt");
+    let cv_path = dir.path().join("cv.txt");
+    let socket_path = dir.path().join("ctrl.sock");
+
+    std::fs::write(&pv_path, "50.0\n").expect("write pv");
+    let _guard = spawn_loop(&pv_path, &cv_path, None, &socket_path, &[]);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(300));
+
+    let (out, status) = run_ctl_cmd(&["reset", "--socket", socket_path.to_str().unwrap()]);
+    assert!(status.success(), "pid-ctl reset failed: {out}");
+    let v: serde_json::Value = serde_json::from_str(out.trim()).expect("parse reset output");
+    assert_eq!(v["ok"], true);
+    assert!(v["i_acc_before"].is_number(), "reset should return i_acc_before");
+
+    // Status immediately after reset should show i_acc == 0.
+    let raw = socket_request(&socket_path, r#"{"cmd":"status"}"#);
+    let sv: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+    assert_eq!(sv["i_acc"], 0.0, "i_acc should be 0 immediately after reset");
+}
+
+#[test]
+fn test_cli_save_no_state() {
+    let dir = tempdir().expect("temp dir");
+    let pv_path = dir.path().join("pv.txt");
+    let cv_path = dir.path().join("cv.txt");
+    let socket_path = dir.path().join("ctrl.sock");
+
+    std::fs::write(&pv_path, "50.0\n").expect("write pv");
+    let _guard = spawn_loop(&pv_path, &cv_path, None, &socket_path, &[]);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(150));
+
+    let (out, status) = run_ctl_cmd(&["save", "--socket", socket_path.to_str().unwrap()]);
+    // Exit code is non-zero because save returned ok:false.
+    assert!(!status.success(), "pid-ctl save without --state should exit non-zero, got: {out}");
+    let v: serde_json::Value = serde_json::from_str(out.trim()).expect("parse save output");
+    assert_eq!(v["ok"], false);
+}
+
+#[test]
+fn test_cli_set_missing_flags() {
+    // Missing --socket
+    let (_, status) = run_ctl_cmd(&["set", "--param", "kp", "--value", "1.0"]);
+    assert!(!status.success());
+
+    // Missing --param
+    let (_, status) = run_ctl_cmd(&["set", "--socket", "/tmp/nonexistent.sock", "--value", "1.0"]);
+    assert!(!status.success());
+
+    // Missing --value
+    let (_, status) = run_ctl_cmd(&["set", "--socket", "/tmp/nonexistent.sock", "--param", "kp"]);
+    assert!(!status.success());
+}

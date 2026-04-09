@@ -23,7 +23,9 @@ fn main() {
     let exit_code = match run(&args, &full_argv) {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("{error}");
+            if !error.message.is_empty() {
+                eprintln!("{error}");
+            }
             error.exit_code
         }
     };
@@ -34,7 +36,7 @@ fn main() {
 fn run(args: &[String], full_argv: &[String]) -> Result<(), CliError> {
     let Some((command, rest)) = args.split_first() else {
         return Err(CliError::config(
-            "usage: pid-ctl <once|loop|pipe|status|purge|init> [OPTIONS]",
+            "usage: pid-ctl <once|loop|pipe|status|set|hold|resume|reset|save|purge|init> [OPTIONS]",
         ));
     };
 
@@ -59,6 +61,11 @@ fn run(args: &[String], full_argv: &[String]) -> Result<(), CliError> {
             let flags = parse_status_flags(rest)?;
             run_status_dispatch(&flags)
         }
+        "set" => run_socket_set(rest),
+        "hold" => run_socket_hold(rest),
+        "resume" => run_socket_resume(rest),
+        "reset" => run_socket_reset(rest),
+        "save" => run_socket_save(rest),
         "purge" => {
             let state_path = parse_state_flag(rest, "purge")?;
             run_purge(&state_path)
@@ -68,7 +75,7 @@ fn run(args: &[String], full_argv: &[String]) -> Result<(), CliError> {
             run_init(&state_path)
         }
         other => Err(CliError::config(format!(
-            "unknown subcommand `{other}`; expected `once`, `pipe`, `loop`, `status`, `purge`, or `init`"
+            "unknown subcommand `{other}`; expected `once`, `pipe`, `loop`, `status`, `set`, `hold`, `resume`, `reset`, `save`, `purge`, or `init`"
         ))),
     }
 }
@@ -1054,7 +1061,6 @@ fn parse_state_flag(args: &[String], command: &str) -> Result<PathBuf, CliError>
     Err(CliError::config(format!("{command} requires --state")))
 }
 
-#[allow(dead_code)] // socket_path will be used in the socket integration bead
 struct StatusFlags {
     state_path: Option<PathBuf>,
     socket_path: Option<PathBuf>,
@@ -1141,6 +1147,155 @@ fn run_status_dispatch(flags: &StatusFlags) -> Result<(), CliError> {
     } else {
         Err(CliError::config("status requires --state or --socket"))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Socket control subcommands: set, hold, resume, reset, save
+// ---------------------------------------------------------------------------
+
+/// Parse the `--socket <path>` flag required by socket-control subcommands.
+fn parse_socket_control_flag(args: &[String], cmd: &str) -> Result<PathBuf, CliError> {
+    let mut socket_path = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--socket" => {
+                i += 1;
+                let val = args
+                    .get(i)
+                    .ok_or_else(|| CliError::config("--socket requires a path"))?;
+                socket_path = Some(PathBuf::from(val));
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::config(format!(
+                    "{cmd}: unrecognized option `{other}`"
+                )));
+            }
+            other => {
+                return Err(CliError::config(format!(
+                    "{cmd}: unexpected argument `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    socket_path.ok_or_else(|| CliError::config(format!("{cmd} requires --socket <path>")))
+}
+
+/// Send a socket request, print the JSON response to stdout, and exit non-zero when `ok` is false.
+fn socket_send_and_print(
+    socket_path: &Path,
+    req: &pid_ctl::socket::Request,
+    cmd: &str,
+) -> Result<(), CliError> {
+    match pid_ctl::socket::client_request(socket_path, req) {
+        Ok(response) => {
+            let json =
+                serde_json::to_string(&response).map_err(|e| CliError::new(1, e.to_string()))?;
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            writeln!(handle, "{json}")
+                .map_err(|e| CliError::new(1, format!("stdout write failed: {e}")))?;
+            // Mirror ok:false as a non-zero exit so callers can detect failure without parsing JSON.
+            let ok = serde_json::to_value(&response)
+                .ok()
+                .and_then(|v| v["ok"].as_bool())
+                .unwrap_or(true);
+            if ok {
+                Ok(())
+            } else {
+                Err(CliError::new(1, String::new()))
+            }
+        }
+        Err(e) => Err(CliError::new(1, format!("{cmd}: socket error: {e}"))),
+    }
+}
+
+fn run_socket_hold(args: &[String]) -> Result<(), CliError> {
+    let path = parse_socket_control_flag(args, "hold")?;
+    socket_send_and_print(&path, &pid_ctl::socket::Request::Hold, "hold")
+}
+
+fn run_socket_resume(args: &[String]) -> Result<(), CliError> {
+    let path = parse_socket_control_flag(args, "resume")?;
+    socket_send_and_print(&path, &pid_ctl::socket::Request::Resume, "resume")
+}
+
+fn run_socket_reset(args: &[String]) -> Result<(), CliError> {
+    let path = parse_socket_control_flag(args, "reset")?;
+    socket_send_and_print(&path, &pid_ctl::socket::Request::Reset, "reset")
+}
+
+fn run_socket_save(args: &[String]) -> Result<(), CliError> {
+    let path = parse_socket_control_flag(args, "save")?;
+    socket_send_and_print(&path, &pid_ctl::socket::Request::Save, "save")
+}
+
+struct SetArgs {
+    socket_path: PathBuf,
+    param: String,
+    value: f64,
+}
+
+fn parse_set_args(args: &[String]) -> Result<SetArgs, CliError> {
+    let mut socket_path = None;
+    let mut param: Option<String> = None;
+    let mut value: Option<f64> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--socket" => {
+                i += 1;
+                let val = args
+                    .get(i)
+                    .ok_or_else(|| CliError::config("--socket requires a path"))?;
+                socket_path = Some(PathBuf::from(val));
+            }
+            "--param" => {
+                i += 1;
+                let val = args
+                    .get(i)
+                    .ok_or_else(|| CliError::config("--param requires a value"))?;
+                param = Some(val.clone());
+            }
+            "--value" => {
+                i += 1;
+                let val = args
+                    .get(i)
+                    .ok_or_else(|| CliError::config("--value requires a number"))?;
+                value = Some(
+                    val.parse::<f64>()
+                        .map_err(|_| CliError::config(format!("--value: invalid float `{val}`")))?,
+                );
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::config(format!(
+                    "set: unrecognized option `{other}`"
+                )));
+            }
+            other => {
+                return Err(CliError::config(format!(
+                    "set: unexpected argument `{other}`"
+                )));
+            }
+        }
+        i += 1;
+    }
+    Ok(SetArgs {
+        socket_path: socket_path
+            .ok_or_else(|| CliError::config("set requires --socket <path>"))?,
+        param: param.ok_or_else(|| CliError::config("set requires --param <name>"))?,
+        value: value.ok_or_else(|| CliError::config("set requires --value <float>"))?,
+    })
+}
+
+fn run_socket_set(args: &[String]) -> Result<(), CliError> {
+    let parsed = parse_set_args(args)?;
+    let req = pid_ctl::socket::Request::Set {
+        param: parsed.param,
+        value: parsed.value,
+    };
+    socket_send_and_print(&parsed.socket_path, &req, "set")
 }
 
 pub(crate) fn build_cv_sink(
