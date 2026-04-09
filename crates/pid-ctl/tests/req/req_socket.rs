@@ -563,3 +563,45 @@ fn test_socket_save_with_state_returns_ok() {
     assert_eq!(v["ok"], true, "save with --state should return ok:true, got: {v}");
     assert!(state_path.exists(), "state file should exist after save");
 }
+
+#[test]
+fn test_socket_ready_event_emitted_on_stderr() {
+    let dir = tempdir().expect("temp dir");
+    let pv_path = dir.path().join("pv.txt");
+    let cv_path = dir.path().join("cv.txt");
+    let socket_path = dir.path().join("ctrl.sock");
+
+    std::fs::write(&pv_path, "50.0\n").expect("write pv");
+
+    let mut guard = spawn_loop(&pv_path, &cv_path, None, &socket_path, &[]);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    // Take the stderr pipe before killing, then wait for the process to exit.
+    let stderr_pipe = guard.0.stderr.take().expect("stderr should be piped");
+    guard.0.kill().ok();
+    guard.0.wait().ok();
+
+    // Read all stderr output.
+    use std::io::Read as _;
+    let mut stderr = String::new();
+    std::io::BufReader::new(stderr_pipe).read_to_string(&mut stderr).ok();
+
+    // Find the socket_ready NDJSON line.
+    let ready_line = stderr
+        .lines()
+        .find(|l| l.contains("\"socket_ready\""))
+        .unwrap_or_else(|| panic!("no socket_ready event found in stderr:\n{stderr}"));
+
+    let v: serde_json::Value =
+        serde_json::from_str(ready_line).expect("socket_ready line must be valid JSON");
+    assert_eq!(v["event"], "socket_ready");
+    assert!(
+        v["path"].as_str().is_some(),
+        "socket_ready event must include a path field"
+    );
+    assert!(
+        v["path"].as_str().unwrap().contains("ctrl.sock"),
+        "path field should match the socket path, got: {}",
+        v["path"]
+    );
+}

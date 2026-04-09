@@ -194,15 +194,16 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
 
     // Bind socket listener when --socket is set.
     let socket_listener = if let Some(ref path) = args.socket_path {
-        Some(
+        let listener =
             pid_ctl::socket::SocketListener::bind(path, args.socket_mode).map_err(|e| match e {
                 pid_ctl::socket::SocketError::AlreadyRunning => CliError::new(
                     3,
                     format!("socket {}: another instance is running", path.display()),
                 ),
                 other => CliError::new(1, format!("socket: {other}")),
-            })?,
-        )
+            })?;
+        json_events::emit_socket_ready(&mut log_file, path.clone());
+        Some(listener)
     } else {
         None
     };

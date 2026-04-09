@@ -421,6 +421,30 @@ pub fn emit_integral_reset(
     emit_line(log, &IntegralResetEvent::new(i_acc_before, iter, source));
 }
 
+#[derive(Serialize)]
+pub struct SocketReadyEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub path: std::path::PathBuf,
+}
+
+impl SocketReadyEvent {
+    #[must_use]
+    pub fn new(path: std::path::PathBuf) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "socket_ready",
+            path,
+        }
+    }
+}
+
+pub fn emit_socket_ready(log: &mut Option<std::fs::File>, path: std::path::PathBuf) {
+    emit_line(log, &SocketReadyEvent::new(path));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,6 +460,19 @@ mod tests {
         f.seek(SeekFrom::Start(0)).unwrap();
         f.read_to_string(&mut s).unwrap();
         assert!(s.contains("\"event\":\"gains_changed\""), "{s:?}");
+    }
+
+    #[test]
+    fn socket_ready_event_fields() {
+        let mut log = Some(tempfile::tempfile().unwrap());
+        emit_socket_ready(&mut log, std::path::PathBuf::from("/tmp/ctl.sock"));
+        let mut f = log.unwrap();
+        let mut s = String::new();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.read_to_string(&mut s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+        assert_eq!(v["event"], "socket_ready");
+        assert_eq!(v["path"], "/tmp/ctl.sock");
     }
 
     #[test]
