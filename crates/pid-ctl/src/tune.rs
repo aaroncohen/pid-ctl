@@ -1,19 +1,4 @@
 //! Interactive `loop --tune` dashboard (`pid-ctl_plan.md` § `--tune`).
-#![allow(
-    clippy::too_many_lines,
-    clippy::struct_excessive_bools,
-    clippy::similar_names,
-    clippy::collapsible_if,
-    clippy::match_same_arms,
-    clippy::map_unwrap_or,
-    clippy::format_push_string,
-    clippy::unnecessary_wraps,
-    clippy::manual_clamp,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
-    clippy::needless_pass_by_value
-)]
 
 use crate::CliError;
 use crate::LoopArgs;
@@ -93,6 +78,9 @@ impl GainFocus {
     }
 }
 
+// The four bools are independent, orthogonal flags (command_mode, help_overlay, hold, quit/dry_run).
+// An enum-per-flag state machine would add complexity with no clarity gain here.
+#[allow(clippy::struct_excessive_bools)]
 struct TuneUiState {
     focus: GainFocus,
     step: [f64; 4],
@@ -183,12 +171,12 @@ impl TuneUiState {
             return;
         }
         let text = parts.join("  ");
-        if let Some(ann) = self.annotations.back_mut() {
-            if self.tick_serial.saturating_sub(ann.marker_tick) <= 3 {
-                ann.text = format!("{} · {}", ann.text, text);
-                ann.marker_tick = self.tick_serial;
-                return;
-            }
+        if let Some(ann) = self.annotations.back_mut()
+            && self.tick_serial.saturating_sub(ann.marker_tick) <= 3
+        {
+            ann.text = format!("{} · {}", ann.text, text);
+            ann.marker_tick = self.tick_serial;
+            return;
         }
         self.annotations.push_back(GainAnnotation {
             marker_tick: self.tick_serial,
@@ -207,7 +195,10 @@ const TUNE_IDLE_DRAW_MIN: Duration = Duration::from_millis(200);
 const TUNE_IDLE_DRAW_DEADLINE_NEAR: Duration = Duration::from_millis(120);
 
 /// Runs the interactive tuning dashboard until the operator quits or a fatal loop error occurs.
-pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
+// The event loop integrates input, PID ticking, socket servicing, and throttled redraws in one
+// place — splitting it further would require passing state through many helper boundaries.
+#[allow(clippy::too_many_lines)]
+pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
     let _suppress_structured_json_stderr = json_events::suppress_structured_json_stderr();
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|e| CliError::config(e.to_string()))?;
@@ -262,7 +253,7 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
     let run_result = (|| -> Result<(), CliError> {
         loop {
             if shutdown.load(Ordering::Relaxed) || ui.quit {
-                export_line_stderr(&full_argv, &args);
+                export_line_stderr(full_argv, &args);
                 flush_shutdown(&mut session, &args, &mut log_file);
                 return Ok(());
             }
@@ -288,7 +279,7 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
                                 &mut session,
                                 &mut args,
                                 key,
-                                &full_argv,
+                                full_argv,
                                 &mut log_file,
                             )?;
                         } else {
@@ -297,9 +288,9 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
                                 &mut session,
                                 &mut args,
                                 key,
-                                &full_argv,
+                                full_argv,
                                 &mut log_file,
-                            )?;
+                            );
                         }
                     }
                     _ => {}
@@ -433,7 +424,7 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
             if ui.hold {
                 let held = session
                     .last_applied_cv()
-                    .unwrap_or_else(|| ui.last_record.as_ref().map(|r| r.cv).unwrap_or(0.0));
+                    .unwrap_or_else(|| ui.last_record.as_ref().map_or(0.0, |r| r.cv));
                 let mut dry = DryRunCvSink;
                 let active: &mut dyn CvSink = if ui.dry_run {
                     &mut dry
@@ -676,7 +667,7 @@ fn handle_normal_key(
     key: crossterm::event::KeyEvent,
     full_argv: &[String],
     log_file: &mut Option<std::fs::File>,
-) -> Result<(), CliError> {
+) {
     match key.code {
         KeyCode::Char('q') => {
             export_line_stderr(full_argv, args);
@@ -711,8 +702,8 @@ fn handle_normal_key(
         }
         KeyCode::Up => ui.focus = ui.focus.prev(),
         KeyCode::Down => ui.focus = ui.focus.next(),
-        KeyCode::Left => adjust_focused_gain(ui, session, args, log_file, -1.0)?,
-        KeyCode::Right => adjust_focused_gain(ui, session, args, log_file, 1.0)?,
+        KeyCode::Left => adjust_focused_gain(ui, session, args, log_file, -1.0),
+        KeyCode::Right => adjust_focused_gain(ui, session, args, log_file, 1.0),
         KeyCode::Char('[') => {
             ui.step[ui.focus.idx()] *= 0.5;
         }
@@ -721,7 +712,6 @@ fn handle_normal_key(
         }
         _ => {}
     }
-    Ok(())
 }
 
 fn adjust_focused_gain(
@@ -730,7 +720,7 @@ fn adjust_focused_gain(
     args: &mut LoopArgs,
     log_file: &mut Option<std::fs::File>,
     sign: f64,
-) -> Result<(), CliError> {
+) {
     let step = ui.step[ui.focus.idx()] * sign;
     let c = session.config().clone();
     match ui.focus {
@@ -744,7 +734,6 @@ fn adjust_focused_gain(
     let iter = ui.last_record.as_ref().map_or(0, |r| r.iter);
     let c = session.config();
     json_events::emit_gains_changed(log_file, c.kp, c.ki, c.kd, c.setpoint, iter, "tui");
-    Ok(())
 }
 
 fn handle_command_key(
@@ -774,6 +763,9 @@ fn handle_command_key(
     Ok(())
 }
 
+// The command interpreter handles many distinct sub-commands; each arm is a few lines but the
+// combined match body is inherently long.
+#[allow(clippy::too_many_lines)]
 fn run_command_line(
     ui: &mut TuneUiState,
     session: &mut ControllerSession,
@@ -970,7 +962,9 @@ fn spark_data(values: &VecDeque<f64>) -> Vec<u64> {
             if !v.is_finite() {
                 return 0u64;
             }
-            (((v - min_v) / span) * 100.0).clamp(0.0, 100.0).round() as u64
+            // Value is clamped to [0.0, 100.0] before rounding, so truncation and sign loss are safe.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            { (((v - min_v) / span) * 100.0).clamp(0.0, 100.0).round() as u64 }
         })
         .collect()
 }
@@ -992,10 +986,10 @@ fn spark_marker_row(
     let w = width.max(1);
     let mut bytes = vec![b' '; w];
     for ann in annotations {
-        if let Some(col) = serial_window.iter().position(|s| *s == ann.marker_tick) {
-            if col < w {
-                bytes[col] = b'|';
-            }
+        if let Some(col) = serial_window.iter().position(|s| *s == ann.marker_tick)
+            && col < w
+        {
+            bytes[col] = b'|';
         }
     }
     String::from_utf8_lossy(&bytes).into_owned()
@@ -1036,6 +1030,10 @@ fn cv_percent(cv: f64, lo: f64, hi: f64) -> Option<f64> {
 
 fn cv_bar_block(frac: f64, width: usize) -> String {
     let width = width.max(1);
+    // frac is in [0.0, 1.0]; width is a small terminal column count.
+    // Casting width (usize) to f64 is lossless for any realistic terminal width.
+    // Casting the rounded product back to usize: result is clamped by .min(width).
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let filled = ((frac * width as f64).round() as usize).min(width);
     let mut s = String::with_capacity(width + 2);
     s.push('[');
@@ -1189,6 +1187,9 @@ Command mode: kp/ki/kd/sp <value>, interval <dur>, reset, hold, resume, save, ex
 Export / copy-paste: c or export prints a full non-interactive CLI (and a short “Tuned gains only” line) to stderr; also printed on clean quit.\n\
 ";
 
+// Drawing a complex multi-panel TUI layout necessarily touches many widgets in sequence;
+// extracting sub-panels would require threading the frame reference through many helpers.
+#[allow(clippy::too_many_lines)]
 fn render_frame(
     f: &mut Frame<'_>,
     session: &ControllerSession,
@@ -1218,6 +1219,8 @@ fn render_frame(
         .unwrap_or_else(|| "pid-ctl".to_string());
     let elapsed = ui.start.elapsed();
     let elapsed_s = elapsed.as_secs();
+    // tune_history is a small integer (default 60); as f64 is exact for all practical values.
+    #[allow(clippy::cast_precision_loss)]
     let hist_wall_s = interval_secs * args.tune_history as f64;
     let header = Line::from(vec![Span::styled(
         format!(
@@ -1269,11 +1272,9 @@ fn render_frame(
     let cv_val = ui.last_record.as_ref().map_or(0.0, |r| r.cv);
     let bar_w = 15usize;
     let bar_str = cv_fill_fraction(cv_val, cfg.out_min, cfg.out_max)
-        .map(|f| cv_bar_block(f, bar_w))
-        .unwrap_or_else(|| "[ n/a ]".to_string());
+        .map_or_else(|| "[ n/a ]".to_string(), |f| cv_bar_block(f, bar_w));
     let pct_str = cv_percent(cv_val, cfg.out_min, cfg.out_max)
-        .map(|p| format!("{p:.0}%"))
-        .unwrap_or_else(|| "—".to_string());
+        .map_or_else(|| "—".to_string(), |p| format!("{p:.0}%"));
 
     let i_acc_hint = "anti-windup active — accumulator self-corrects when saturated; press r to reset manually if output is stuck";
 
@@ -1391,11 +1392,11 @@ fn render_frame(
     f.render_widget(Paragraph::new(marker_row.clone()), hist_inner[2]);
 
     let cv_label = Line::from("CV ");
-    let spark_cv = Sparkline::default()
+    let cv_sparkline = Sparkline::default()
         .data(&cv_spark)
         .style(Style::default().fg(Color::LightGreen));
     f.render_widget(
-        spark_cv.block(Block::default().title(cv_label)),
+        cv_sparkline.block(Block::default().title(cv_label)),
         hist_inner[3],
     );
     f.render_widget(Paragraph::new(marker_row), hist_inner[4]);

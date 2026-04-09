@@ -54,7 +54,7 @@ fn run(args: &[String], #[cfg_attr(not(feature = "tui"), allow(unused_variables)
             let mut parsed = parse_loop(rest)?;
             #[cfg(feature = "tui")]
             if parsed.tune {
-                return tune::run(parsed, full_argv.to_vec());
+                return tune::run(parsed, full_argv);
             }
             #[cfg(not(feature = "tui"))]
             if parsed.tune {
@@ -818,6 +818,8 @@ fn flush_state_at_shutdown(
     }
 }
 
+// parse_loop sets many optional fields; splitting it would just move lines without adding clarity.
+#[allow(clippy::too_many_lines)]
 fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
     let common = parse_common_args(args, CommandKind::Loop)?;
 
