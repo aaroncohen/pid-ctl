@@ -234,7 +234,7 @@ impl PidController {
         );
         let u_unclamped = p_term + i_term + d_term;
         let saturated = u_unclamped < self.config.out_min || u_unclamped > self.config.out_max;
-        let clamped_cv = clamp(u_unclamped, self.config.out_min, self.config.out_max);
+        let clamped_cv = u_unclamped.clamp(self.config.out_min, self.config.out_max);
         let cv = self.apply_slew_rate(clamped_cv, input.prev_applied_cv, input.dt);
 
         self.i_acc = i_acc;
@@ -337,7 +337,7 @@ impl PidController {
                 let pd_sum = p_term + d_term;
                 let min_i_term = self.config.out_min - pd_sum;
                 let max_i_term = self.config.out_max - pd_sum;
-                let clamped_i_term = clamp(candidate_i_term, min_i_term, max_i_term);
+                let clamped_i_term = candidate_i_term.clamp(min_i_term, max_i_term);
 
                 (clamped_i_term / self.config.ki, clamped_i_term)
             }
@@ -382,7 +382,7 @@ impl PidController {
         let min_cv = prev_applied_cv - max_delta;
         let max_cv = prev_applied_cv + max_delta;
 
-        clamp(clamped_cv, min_cv, max_cv)
+        clamped_cv.clamp(min_cv, max_cv)
     }
 }
 
@@ -426,11 +426,6 @@ impl fmt::Display for ConfigError {
 
 impl Error for ConfigError {}
 
-// TODO: consider replacing with f64::clamp — functionally equivalent here since
-// inputs are validated, but std's version is more idiomatic.
-const fn clamp(value: f64, min: f64, max: f64) -> f64 {
-    value.max(min).min(max)
-}
 
 fn ramp_toward(current: f64, target: f64, max_delta: f64) -> f64 {
     if (target - current).abs() <= max_delta {

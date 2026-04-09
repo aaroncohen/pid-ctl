@@ -506,64 +506,15 @@ fn finite_value(value: f64) -> Option<f64> {
 
 #[must_use]
 pub fn now_iso8601() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let (year, month, day, hour, min, sec) = timestamp_to_utc(secs);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
-}
-
-/// Converts Unix seconds to (year, month, day, hour, min, sec) in UTC.
-fn timestamp_to_utc(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
-    let sec = secs % 60;
-    let mins = secs / 60;
-    let min = mins % 60;
-    let hours = mins / 60;
-    let hour = hours % 24;
-    let days = hours / 24;
-
-    let mut year = 1970u64;
-    let mut remaining_days = days;
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if remaining_days < days_in_year {
-            break;
-        }
-        remaining_days -= days_in_year;
-        year += 1;
-    }
-
-    let month_days: [u64; 12] = [
-        31,
-        if is_leap_year(year) { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 1u64;
-    for &days_in_month in &month_days {
-        if remaining_days < days_in_month {
-            break;
-        }
-        remaining_days -= days_in_month;
-        month += 1;
-    }
-    let day = remaining_days + 1;
-
-    (year, month, day, hour, min, sec)
-}
-
-const fn is_leap_year(year: u64) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+    use time::format_description::FormatItem;
+    use time::macros::format_description;
+    use time::OffsetDateTime;
+    // Produce YYYY-MM-DDTHH:MM:SSZ (no sub-seconds, Z suffix).
+    const FMT: &[FormatItem<'_>] =
+        format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
+    OffsetDateTime::now_utc()
+        .format(FMT)
+        .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z"))
 }
 
 fn resolve_controller_name(
