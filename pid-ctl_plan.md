@@ -10,7 +10,6 @@ A composable, tunable PID controller for the command line, written in Rust.
 - Flexible I/O: reads PV and writes CV from/to files, commands, sysfs, stdin/stdout
 - Operator-friendly: live tuning dashboard with inline educational hints
 - LLM/automation-friendly: non-interactive control via Unix socket and persisted state snapshots
-- Zero runtime dependencies: single static binary
 - Safety & reliability: built to stringent standards suitable for robust industrial-style automation and operator-supervised control
 
 ---
