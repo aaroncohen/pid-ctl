@@ -6,9 +6,6 @@
 
 #![forbid(unsafe_code)]
 
-// TODO: filter module is currently empty — either move `filtered_pv` logic here
-// or remove this module declaration to avoid dead-weight confusion.
-pub mod filter;
 
 use std::error::Error;
 use std::fmt;
