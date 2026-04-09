@@ -1,5 +1,6 @@
 //! PV/CV I/O adapters for `once`, `pipe`, and `loop` execution paths.
 
+use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
@@ -268,21 +269,46 @@ impl PvSource for CmdPvSource {
 
 /// Reads one line from stdin per tick, blocking up to a configurable timeout.
 ///
-/// Each call to [`read_pv`] blocks for at most `timeout` waiting for a line.
+/// A single background thread is spawned at construction time and reads lines
+/// from stdin continuously, sending each line (or error) over a channel.
+/// Each call to [`read_pv`] waits on that channel for at most `timeout`.
 /// On timeout, returns an [`io::Error`] with [`io::ErrorKind::TimedOut`].
 /// The line is trimmed and parsed as [`f64`].
 ///
 /// [`read_pv`]: PvSource::read_pv
-#[derive(Debug)]
 pub struct StdinPvSource {
     timeout: Duration,
+    rx: mpsc::Receiver<io::Result<String>>,
+}
+
+impl fmt::Debug for StdinPvSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StdinPvSource")
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StdinPvSource {
     /// Creates a new [`StdinPvSource`] that blocks for at most `timeout` per read.
+    ///
+    /// Spawns a single background thread that reads lines from stdin.
     #[must_use]
-    pub const fn new(timeout: Duration) -> Self {
-        Self { timeout }
+    pub fn new(timeout: Duration) -> Self {
+        let (tx, rx) = mpsc::sync_channel::<io::Result<String>>(1);
+        thread::spawn(move || {
+            let stdin = io::stdin();
+            let mut stdin = stdin.lock();
+            loop {
+                let mut line = String::new();
+                let result = stdin.read_line(&mut line).map(|_| line);
+                let eof = matches!(&result, Ok(s) if s.is_empty());
+                if tx.send(result).is_err() || eof {
+                    break;
+                }
+            }
+        });
+        Self { timeout, rx }
     }
 }
 
@@ -290,16 +316,7 @@ impl PvSource for StdinPvSource {
     fn read_pv(&mut self) -> io::Result<f64> {
         let timeout = self.timeout;
 
-        let (tx, rx) = mpsc::channel::<io::Result<String>>();
-
-        thread::spawn(move || {
-            let stdin = io::stdin();
-            let mut line = String::new();
-            let result = stdin.lock().read_line(&mut line).map(|_| line);
-            let _ = tx.send(result);
-        });
-
-        match rx.recv_timeout(timeout) {
+        match self.rx.recv_timeout(timeout) {
             Ok(Ok(line)) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
