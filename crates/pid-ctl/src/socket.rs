@@ -79,6 +79,8 @@ pub enum Response {
     },
     Ack {
         ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     ErrorUnknownCommand {
         ok: bool,
@@ -228,6 +230,7 @@ impl SocketListener {
                 &stream,
                 &Response::Ack {
                     ok: false,
+                    error: Some(String::from("request too large")),
                 },
             );
             return Ok(Some(()));
@@ -368,7 +371,7 @@ mod tests {
         let json = serde_json::to_string(&reset).unwrap();
         assert!(json.contains(r#""i_acc_before":5.5"#));
 
-        let ack = Response::Ack { ok: true };
+        let ack = Response::Ack { ok: true, error: None };
         let json = serde_json::to_string(&ack).unwrap();
         assert_eq!(json, r#"{"ok":true}"#);
 
@@ -440,7 +443,7 @@ mod tests {
         // Service the connection.
         let result = listener.try_service_one(|r| {
             assert_eq!(r, Request::Status);
-            Response::Ack { ok: true }
+            Response::Ack { ok: true, error: None }
         });
         assert!(result.unwrap().is_some());
 
@@ -448,7 +451,7 @@ mod tests {
         let mut resp_buf = String::new();
         client.read_to_string(&mut resp_buf).unwrap();
         let resp: Response = serde_json::from_str(resp_buf.trim()).unwrap();
-        assert_eq!(resp, Response::Ack { ok: true });
+        assert_eq!(resp, Response::Ack { ok: true, error: None });
     }
 
     #[test]
@@ -473,14 +476,14 @@ mod tests {
             reader.read_to_string(&mut buf).unwrap();
             let _req: Request = serde_json::from_str(&buf).unwrap();
 
-            let resp = Response::Ack { ok: true };
+            let resp = Response::Ack { ok: true, error: None };
             let mut json = serde_json::to_string(&resp).unwrap();
             json.push('\n');
             (&stream).write_all(json.as_bytes()).unwrap();
         });
 
         let resp = client_request(&path_clone, &Request::Status).unwrap();
-        assert_eq!(resp, Response::Ack { ok: true });
+        assert_eq!(resp, Response::Ack { ok: true, error: None });
 
         server.join().unwrap();
     }

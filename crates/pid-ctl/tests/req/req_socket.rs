@@ -518,3 +518,48 @@ fn test_socket_mode_permissions() {
         "socket mode should be 0660, got {mode:#o}"
     );
 }
+
+#[test]
+fn test_socket_save_without_state_returns_error() {
+    let dir = tempdir().expect("temp dir");
+    let pv_path = dir.path().join("pv.txt");
+    let cv_path = dir.path().join("cv.txt");
+    let socket_path = dir.path().join("ctrl.sock");
+
+    std::fs::write(&pv_path, "50.0\n").expect("write pv");
+
+    // No --state flag — save should return ok:false with an error message.
+    let _guard = spawn_loop(&pv_path, &cv_path, None, &socket_path, &[]);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(150));
+
+    let raw = socket_request(&socket_path, r#"{"cmd":"save"}"#);
+    let v: serde_json::Value = serde_json::from_str(raw.trim()).expect("parse save response");
+
+    assert_eq!(v["ok"], false, "save without --state should return ok:false, got: {v}");
+    assert!(
+        v["error"].as_str().is_some(),
+        "save without --state should include an error message, got: {v}"
+    );
+}
+
+#[test]
+fn test_socket_save_with_state_returns_ok() {
+    let dir = tempdir().expect("temp dir");
+    let pv_path = dir.path().join("pv.txt");
+    let cv_path = dir.path().join("cv.txt");
+    let state_path = dir.path().join("state.json");
+    let socket_path = dir.path().join("ctrl.sock");
+
+    std::fs::write(&pv_path, "50.0\n").expect("write pv");
+
+    let _guard = spawn_loop(&pv_path, &cv_path, Some(&state_path), &socket_path, &[]);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(300));
+
+    let raw = socket_request(&socket_path, r#"{"cmd":"save"}"#);
+    let v: serde_json::Value = serde_json::from_str(raw.trim()).expect("parse save response");
+
+    assert_eq!(v["ok"], true, "save with --state should return ok:true, got: {v}");
+    assert!(state_path.exists(), "state file should exist after save");
+}

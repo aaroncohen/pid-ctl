@@ -161,8 +161,9 @@ impl ControllerSession {
     }
 
     /// Clears the integral accumulator and marks the next tick for D-term protection (`post_reset`).
-    pub const fn reset_integral(&mut self) {
+    pub fn reset_integral(&mut self) {
         self.controller.reset_integral();
+        self.snapshot.i_acc = 0.0;
     }
 
     /// Updates coalesced state flush cadence (used when `--interval` changes at runtime).
@@ -348,6 +349,12 @@ impl ControllerSession {
     #[must_use]
     pub const fn state_fail_count(&self) -> u32 {
         self.state_fail_count
+    }
+
+    /// Returns `true` if this session was created with a `--state` path (i.e. persistence is active).
+    #[must_use]
+    pub const fn has_state_store(&self) -> bool {
+        self.state_store.is_some()
     }
 
     /// Holds the last CV at the actuator without advancing PID state or `iter` (operator hold).

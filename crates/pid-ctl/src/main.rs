@@ -596,20 +596,28 @@ pub(crate) fn handle_socket_request(
                 SocketSideEffect::None,
             )
         }
-        Request::Hold => (Response::Ack { ok: true }, SocketSideEffect::Hold),
-        Request::Resume => (Response::Ack { ok: true }, SocketSideEffect::Resume),
+        Request::Hold => (Response::Ack { ok: true, error: None }, SocketSideEffect::Hold),
+        Request::Resume => (Response::Ack { ok: true, error: None }, SocketSideEffect::Resume),
         Request::Save => {
+            if !session.has_state_store() {
+                return (
+                    Response::Ack {
+                        ok: false,
+                        error: Some(String::from("no state store: loop was not started with --state")),
+                    },
+                    SocketSideEffect::None,
+                );
+            }
             if let Some(err) = session.force_flush() {
                 (
-                    Response::ErrorUnknownCommand {
+                    Response::Ack {
                         ok: false,
-                        error: format!("save failed: {err}"),
-                        available: vec![],
+                        error: Some(format!("save failed: {err}")),
                     },
                     SocketSideEffect::None,
                 )
             } else {
-                (Response::Ack { ok: true }, SocketSideEffect::None)
+                (Response::Ack { ok: true, error: None }, SocketSideEffect::None)
             }
         }
     }
