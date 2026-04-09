@@ -587,15 +587,7 @@ pub(crate) fn handle_socket_request(
         Request::Reset => {
             let i_acc_before = session.i_acc();
             session.reset_integral();
-            json_events::emit_gains_changed(
-                log_file,
-                session.config().kp,
-                session.config().ki,
-                session.config().kd,
-                session.config().setpoint,
-                session.iter(),
-                "socket",
-            );
+            json_events::emit_integral_reset(log_file, i_acc_before, session.iter(), "socket");
             (
                 Response::Reset {
                     ok: true,

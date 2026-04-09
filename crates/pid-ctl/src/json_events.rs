@@ -388,6 +388,39 @@ pub fn emit_gains_saved(log: &mut Option<std::fs::File>, iter: u64) {
     emit_line(log, &GainsSavedEvent::new(iter));
 }
 
+#[derive(Serialize)]
+pub struct IntegralResetEvent {
+    pub schema_version: u64,
+    pub ts: String,
+    pub event: &'static str,
+    pub i_acc_before: f64,
+    pub iter: u64,
+    pub source: &'static str,
+}
+
+impl IntegralResetEvent {
+    #[must_use]
+    pub fn new(i_acc_before: f64, iter: u64, source: &'static str) -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ts: now_iso8601(),
+            event: "integral_reset",
+            i_acc_before,
+            iter,
+            source,
+        }
+    }
+}
+
+pub fn emit_integral_reset(
+    log: &mut Option<std::fs::File>,
+    i_acc_before: f64,
+    iter: u64,
+    source: &'static str,
+) {
+    emit_line(log, &IntegralResetEvent::new(i_acc_before, iter, source));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +436,22 @@ mod tests {
         f.seek(SeekFrom::Start(0)).unwrap();
         f.read_to_string(&mut s).unwrap();
         assert!(s.contains("\"event\":\"gains_changed\""), "{s:?}");
+    }
+
+    #[test]
+    fn integral_reset_event_fields() {
+        let mut log = Some(tempfile::tempfile().unwrap());
+        emit_integral_reset(&mut log, 42.5, 7, "socket");
+        let mut f = log.unwrap();
+        let mut s = String::new();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.read_to_string(&mut s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+        assert_eq!(v["event"], "integral_reset");
+        assert_eq!(v["i_acc_before"], 42.5);
+        assert_eq!(v["iter"], 7);
+        assert_eq!(v["source"], "socket");
+        // Must NOT contain gains_changed fields
+        assert!(v.get("kp").is_none(), "kp should not be in integral_reset event");
     }
 }
