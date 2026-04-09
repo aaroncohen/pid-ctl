@@ -1,5 +1,6 @@
 //! Continuous-time dynamics integrated with explicit Euler steps (`x += dt * dx_dt`).
 
+use crate::SimError;
 use serde::{Deserialize, Serialize};
 
 /// First-order lag toward `gain * cv`: \( \dot{x} = (K u - x) / \tau \).
@@ -12,13 +13,19 @@ pub struct FirstOrderParams {
 impl FirstOrderParams {
     /// # Errors
     ///
-    /// Returns an error if `tau` is not finite and positive.
-    pub fn validate(&self) -> Result<(), String> {
+    /// Returns [`SimError::Validation`] if `tau` is not finite and positive.
+    pub fn validate(&self) -> Result<(), SimError> {
         if !self.tau.is_finite() || self.tau <= 0.0 {
-            return Err(format!("first-order tau must be finite and > 0, got {}", self.tau));
+            return Err(SimError::Validation(format!(
+                "first-order tau must be finite and > 0, got {}",
+                self.tau
+            )));
         }
         if !self.gain.is_finite() {
-            return Err(format!("first-order gain must be finite, got {}", self.gain));
+            return Err(SimError::Validation(format!(
+                "first-order gain must be finite, got {}",
+                self.gain
+            )));
         }
         Ok(())
     }
@@ -45,16 +52,25 @@ pub struct ThermalParams {
 impl ThermalParams {
     /// # Errors
     ///
-    /// Returns an error if `tau` is not finite and positive.
-    pub fn validate(&self) -> Result<(), String> {
+    /// Returns [`SimError::Validation`] if `tau` is not finite and positive.
+    pub fn validate(&self) -> Result<(), SimError> {
         if !self.tau.is_finite() || self.tau <= 0.0 {
-            return Err(format!("thermal tau must be finite and > 0, got {}", self.tau));
+            return Err(SimError::Validation(format!(
+                "thermal tau must be finite and > 0, got {}",
+                self.tau
+            )));
         }
         if !self.t_ambient.is_finite() {
-            return Err(format!("thermal t_ambient must be finite, got {}", self.t_ambient));
+            return Err(SimError::Validation(format!(
+                "thermal t_ambient must be finite, got {}",
+                self.t_ambient
+            )));
         }
         if !self.k_heat.is_finite() {
-            return Err(format!("thermal k_heat must be finite, got {}", self.k_heat));
+            return Err(SimError::Validation(format!(
+                "thermal k_heat must be finite, got {}",
+                self.k_heat
+            )));
         }
         Ok(())
     }
@@ -84,19 +100,31 @@ pub struct FanParams {
 impl FanParams {
     /// # Errors
     ///
-    /// Returns an error if parameters are inconsistent.
-    pub fn validate(&self) -> Result<(), String> {
+    /// Returns [`SimError::Validation`] if parameters are inconsistent.
+    pub fn validate(&self) -> Result<(), SimError> {
         if !self.tau.is_finite() || self.tau <= 0.0 {
-            return Err(format!("fan tau must be finite and > 0, got {}", self.tau));
+            return Err(SimError::Validation(format!(
+                "fan tau must be finite and > 0, got {}",
+                self.tau
+            )));
         }
         if !self.max_flow.is_finite() || self.max_flow <= 0.0 {
-            return Err(format!("fan max_flow must be finite and > 0, got {}", self.max_flow));
+            return Err(SimError::Validation(format!(
+                "fan max_flow must be finite and > 0, got {}",
+                self.max_flow
+            )));
         }
         if !self.cv_max.is_finite() || self.cv_max <= 0.0 {
-            return Err(format!("fan cv_max must be finite and > 0, got {}", self.cv_max));
+            return Err(SimError::Validation(format!(
+                "fan cv_max must be finite and > 0, got {}",
+                self.cv_max
+            )));
         }
         if !self.exponent.is_finite() || self.exponent <= 0.0 {
-            return Err(format!("fan exponent must be finite and > 0, got {}", self.exponent));
+            return Err(SimError::Validation(format!(
+                "fan exponent must be finite and > 0, got {}",
+                self.exponent
+            )));
         }
         Ok(())
     }

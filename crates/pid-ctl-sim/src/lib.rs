@@ -52,3 +52,33 @@ pub use plant::{
     step_fan, step_first_order, step_thermal, FanParams, FirstOrderParams, ThermalParams,
 };
 pub use state::{Plant, SimState, SCHEMA_VERSION};
+
+use std::fmt;
+use std::io;
+
+/// Errors produced by the simulator (validation, I/O, and parameter parsing).
+#[derive(Debug)]
+pub enum SimError {
+    /// A parameter value failed domain validation.
+    Validation(String),
+    /// An I/O operation failed; `context` describes the path or operation.
+    Io { context: String, source: io::Error },
+}
+
+impl fmt::Display for SimError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation(msg) => write!(f, "{msg}"),
+            Self::Io { context, source } => write!(f, "{context}: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for SimError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Validation(_) => None,
+        }
+    }
+}

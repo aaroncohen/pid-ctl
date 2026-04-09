@@ -1,4 +1,5 @@
 use crate::plant::{FanParams, FirstOrderParams, ThermalParams};
+use crate::SimError;
 use serde::{Deserialize, Serialize};
 
 /// Bump when the JSON shape changes incompatibly.
@@ -38,8 +39,8 @@ impl Plant {
     ///
     /// # Errors
     ///
-    /// Returns a human-readable validation error string.
-    pub fn validate_params(&self) -> Result<(), String> {
+    /// Returns [`SimError::Validation`] when a parameter is out of range.
+    pub fn validate_params(&self) -> Result<(), SimError> {
         match self {
             Plant::FirstOrder { params, .. } => params.validate(),
             Plant::Thermal { params, .. } => params.validate(),
@@ -61,13 +62,15 @@ impl Plant {
     ///
     /// # Errors
     ///
-    /// Returns an error if `dt` is not finite and positive.
-    pub fn apply_cv(&mut self, cv: f64, dt: f64) -> Result<(), String> {
+    /// Returns [`SimError::Validation`] if `dt` or `cv` are not finite and positive.
+    pub fn apply_cv(&mut self, cv: f64, dt: f64) -> Result<(), SimError> {
         if !dt.is_finite() || dt <= 0.0 {
-            return Err(format!("dt must be finite and > 0, got {dt}"));
+            return Err(SimError::Validation(format!(
+                "dt must be finite and > 0, got {dt}"
+            )));
         }
         if !cv.is_finite() {
-            return Err(format!("cv must be finite, got {cv}"));
+            return Err(SimError::Validation(format!("cv must be finite, got {cv}")));
         }
         match self {
             Plant::FirstOrder { params, x } => {
@@ -87,13 +90,13 @@ impl Plant {
 impl SimState {
     /// # Errors
     ///
-    /// Returns an error if the schema version is unsupported or plant parameters are invalid.
-    pub fn validate(&self) -> Result<(), String> {
+    /// Returns [`SimError::Validation`] if the schema version is unsupported or plant parameters are invalid.
+    pub fn validate(&self) -> Result<(), SimError> {
         if self.schema_version != SCHEMA_VERSION {
-            return Err(format!(
+            return Err(SimError::Validation(format!(
                 "unsupported schema_version {} (this binary understands {})",
                 self.schema_version, SCHEMA_VERSION
-            ));
+            )));
         }
         self.plant.validate_params()?;
         Ok(())
@@ -145,5 +148,55 @@ mod tests {
             assert_eq!(back, original);
             back.validate().expect("valid");
         }
+    }
+
+    #[test]
+    fn validate_returns_sim_error_validation_on_bad_params() {
+        use crate::SimError;
+        let bad = SimState {
+            schema_version: SCHEMA_VERSION,
+            plant: Plant::FirstOrder {
+                params: FirstOrderParams { tau: -1.0, gain: 1.0 },
+                x: 0.0,
+            },
+        };
+        let err = bad.validate().expect_err("should fail for tau <= 0");
+        assert!(matches!(err, SimError::Validation(_)), "expected SimError::Validation, got {err:?}");
+        assert!(err.to_string().contains("tau"), "error message should mention 'tau': {err}");
+    }
+
+    #[test]
+    fn validate_returns_sim_error_validation_on_wrong_schema_version() {
+        use crate::SimError;
+        let bad = SimState {
+            schema_version: 999,
+            plant: Plant::FirstOrder {
+                params: FirstOrderParams { tau: 1.0, gain: 1.0 },
+                x: 0.0,
+            },
+        };
+        let err = bad.validate().expect_err("should fail for wrong schema version");
+        assert!(matches!(err, SimError::Validation(_)));
+        assert!(err.to_string().contains("schema_version"), "error should mention schema_version: {err}");
+    }
+
+    #[test]
+    fn apply_cv_returns_sim_error_for_bad_dt() {
+        use crate::SimError;
+        let mut plant = Plant::Thermal {
+            params: ThermalParams { tau: 10.0, t_ambient: 20.0, k_heat: 0.01 },
+            t: 20.0,
+        };
+        let err = plant.apply_cv(1.0, -0.1).expect_err("negative dt should fail");
+        assert!(matches!(err, SimError::Validation(_)));
+        assert!(err.to_string().contains("dt"), "error should mention dt: {err}");
+    }
+
+    #[test]
+    fn sim_error_implements_std_error() {
+        use std::error::Error;
+        let e = crate::SimError::Validation(String::from("test"));
+        assert!(e.source().is_none());
+        assert_eq!(e.to_string(), "test");
     }
 }

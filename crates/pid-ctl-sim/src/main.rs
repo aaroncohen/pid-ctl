@@ -30,7 +30,9 @@
 #![forbid(unsafe_code)]
 
 use clap::{Parser, Subcommand, ValueEnum};
-use pid_ctl_sim::{FanParams, FirstOrderParams, Plant, SimState, ThermalParams, SCHEMA_VERSION};
+use pid_ctl_sim::{
+    FanParams, FirstOrderParams, Plant, SimError, SimState, ThermalParams, SCHEMA_VERSION,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
@@ -89,7 +91,7 @@ fn main() {
     }
 }
 
-fn run(cli: Cli) -> Result<(), String> {
+fn run(cli: Cli) -> Result<(), SimError> {
     match cli.command {
         Command::Init { state, plant, params } => {
             let overrides = parse_param_overrides(&params)?;
@@ -121,31 +123,43 @@ fn run(cli: Cli) -> Result<(), String> {
     }
 }
 
-fn read_state(path: &std::path::Path) -> Result<SimState, String> {
-    pid_ctl_sim::load_state(path).map_err(|e| format!("read {}: {e}", path.display()))
+fn read_state(path: &std::path::Path) -> Result<SimState, SimError> {
+    pid_ctl_sim::load_state(path).map_err(|e| SimError::Io {
+        context: format!("read {}", path.display()),
+        source: e,
+    })
 }
 
-fn write_state(path: &std::path::Path, sim: &SimState) -> Result<(), String> {
+fn write_state(path: &std::path::Path, sim: &SimState) -> Result<(), SimError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create_dir_all: {e}"))?;
+        fs::create_dir_all(parent).map_err(|e| SimError::Io {
+            context: String::from("create_dir_all"),
+            source: e,
+        })?;
     }
-    pid_ctl_sim::save_state(path, sim).map_err(|e| format!("write {}: {e}", path.display()))
+    pid_ctl_sim::save_state(path, sim).map_err(|e| SimError::Io {
+        context: format!("write {}", path.display()),
+        source: e,
+    })
 }
 
-fn parse_param_overrides(raw: &[String]) -> Result<HashMap<String, f64>, String> {
+fn parse_param_overrides(raw: &[String]) -> Result<HashMap<String, f64>, SimError> {
     let mut m = HashMap::new();
     for s in raw {
-        let (k, v) = s
-            .split_once('=')
-            .ok_or_else(|| format!("invalid --param {s:?}, expected KEY=VALUE"))?;
+        let (k, v) = s.split_once('=').ok_or_else(|| {
+            SimError::Validation(format!("invalid --param {s:?}, expected KEY=VALUE"))
+        })?;
         let key = k.trim().to_string();
-        let val: f64 = v.trim().parse().map_err(|e| format!("parse {s:?}: {e}"))?;
+        let val: f64 = v
+            .trim()
+            .parse()
+            .map_err(|e| SimError::Validation(format!("parse {s:?}: {e}")))?;
         m.insert(key, val);
     }
     Ok(m)
 }
 
-fn build_plant(kind: PlantKind, o: &HashMap<String, f64>) -> Result<Plant, String> {
+fn build_plant(kind: PlantKind, o: &HashMap<String, f64>) -> Result<Plant, SimError> {
     let g = |k: &str| o.get(k).copied();
 
     match kind {
