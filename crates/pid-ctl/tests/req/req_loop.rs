@@ -289,3 +289,31 @@ fn loop_accepts_log_flag() {
     // Must not exit with config error 3.
     assert_ne!(output.status.code(), Some(3), "--log caused config error");
 }
+
+/// pid-ctl-gpl: --quiet suppresses stderr diagnostic output.
+/// Verify the flag is accepted and does not cause exit 3.
+#[test]
+fn loop_quiet_flag_accepted() {
+    let dir = tempdir().expect("temporary directory");
+    let pv_path = dir.path().join("pv.txt");
+    std::fs::write(&pv_path, "50.0\n").expect("write pv file");
+
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args(["loop", "--pv-file"]);
+    cmd.arg(&pv_path);
+    cmd.args([
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--interval",
+        "50ms",
+        "--cv-file",
+        "/dev/null",
+        "--quiet",
+    ]);
+
+    cmd.timeout(Duration::from_millis(200));
+    let output = cmd.output().expect("run cmd");
+    assert_ne!(output.status.code(), Some(3), "--quiet caused config error");
+}

@@ -367,6 +367,7 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
                 args.min_dt,
                 args.max_dt,
                 args.dt_clamp,
+                false, // tune is never quiet (tune and --quiet are mutually exclusive)
                 &mut log_file,
             ) {
                 MeasuredDt::Skip => {
@@ -375,6 +376,7 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
                         &session,
                         args.state_path.as_ref(),
                         &mut log_file,
+                        false,
                     );
                     draw(
                         &mut terminal,
@@ -453,6 +455,7 @@ pub fn run(mut args: LoopArgs, full_argv: Vec<String>) -> Result<(), CliError> {
                                 args.state_path.as_ref(),
                                 &mut log_file,
                                 &e,
+                                false,
                             );
                         }
                     }
@@ -541,7 +544,7 @@ fn tune_tick(
             }
 
             if let Some(ref error) = outcome.state_write_failed {
-                emit_state_write_failure(session, args.state_path.as_ref(), log_file, error);
+                emit_state_write_failure(session, args.state_path.as_ref(), log_file, error, false);
             }
 
             Ok(Some(outcome))

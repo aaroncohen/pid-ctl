@@ -128,3 +128,154 @@ fn cv_precision_controls_output_decimal_places() {
 
     cmd.assert().success().stdout("5\n");
 }
+
+/// pid-ctl-s0a: --anti-windup clamp is accepted.
+#[test]
+fn anti_windup_clamp_accepted() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv",
+        "50.0",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--ki",
+        "0.1",
+        "--anti-windup",
+        "clamp",
+        "--cv-stdout",
+    ]);
+
+    cmd.assert().success();
+}
+
+/// pid-ctl-s0a: --anti-windup none is accepted.
+#[test]
+fn anti_windup_none_accepted() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv",
+        "50.0",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--anti-windup",
+        "none",
+        "--cv-stdout",
+    ]);
+
+    cmd.assert().success();
+}
+
+/// pid-ctl-s0a: --anti-windup back-calc is accepted.
+#[test]
+fn anti_windup_back_calc_accepted() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv",
+        "50.0",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--anti-windup",
+        "back-calc",
+        "--cv-stdout",
+    ]);
+
+    cmd.assert().success();
+}
+
+/// pid-ctl-s0a: --anti-windup with invalid value is rejected with exit 3.
+#[test]
+fn anti_windup_invalid_value_rejected() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv",
+        "50.0",
+        "--setpoint",
+        "55.0",
+        "--anti-windup",
+        "invalid",
+        "--cv-stdout",
+    ]);
+
+    cmd.assert()
+        .code(3)
+        .stderr(contains("--anti-windup must be"));
+}
+
+/// pid-ctl-s0a: --anti-windup-tt sets explicit Tt value.
+#[test]
+fn anti_windup_tt_accepted() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv",
+        "50.0",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--ki",
+        "0.1",
+        "--anti-windup-tt",
+        "2.5",
+        "--cv-stdout",
+    ]);
+
+    cmd.assert().success();
+}
+
+/// pid-ctl-1e3: --ramp-rate is accepted as alias for --slew-rate.
+#[test]
+fn ramp_rate_accepted_as_slew_rate_alias() {
+    // --ramp-rate 5 limits CV change to 5/s; with dt=1 and error=10 the unclamped
+    // CV would be 10 but slew-rate caps it at 5 (first iteration from prev_cv=0).
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "once",
+        "--pv",
+        "45.0",
+        "--setpoint",
+        "55.0",
+        "--kp",
+        "1.0",
+        "--ramp-rate",
+        "5.0",
+        "--cv-stdout",
+        "--cv-precision",
+        "1",
+    ]);
+
+    cmd.assert().success().stdout("5.0\n");
+}
+
+/// pid-ctl-i02: --verbose flag is accepted without error (loop with dry-run).
+#[test]
+fn verbose_flag_accepted() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "loop",
+        "--pv-file",
+        "/dev/null",
+        "--cv-stdout",
+        "--setpoint",
+        "55.0",
+        "--interval",
+        "1s",
+        "--verbose",
+        "--dry-run",
+        "--fail-after",
+        "1",
+    ]);
+
+    // Will fail after 1 PV read failure (exit 2), but should not exit 3 (bad flag).
+    cmd.assert().code(2);
+}

@@ -32,3 +32,26 @@ fn cv_stdout_rejects_format_json() {
         "--format json writes to stdout, which conflicts with --cv-stdout — use --log for machine-readable telemetry",
     ));
 }
+
+/// pid-ctl-4x5: loop --format json --cv-stdout must be rejected (exit 3).
+/// Both write to stdout causing corrupted output.
+#[test]
+fn loop_cv_stdout_rejects_format_json() {
+    let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");
+    cmd.args([
+        "loop",
+        "--pv-file",
+        "/dev/null",
+        "--cv-stdout",
+        "--format",
+        "json",
+        "--setpoint",
+        "55.0",
+        "--interval",
+        "1s",
+    ]);
+
+    cmd.assert().code(3).stderr(contains(
+        "--format json and --cv-stdout are incompatible",
+    ));
+}

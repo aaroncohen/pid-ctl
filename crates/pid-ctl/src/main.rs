@@ -148,6 +148,10 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
     };
     let mut log_file = open_log_optional(args.log_path.as_deref())?;
 
+    // Monotonic clock for dt: use elapsed time between lines (plan §dt handling).
+    // First line uses args.dt (no prior tick to measure from).
+    let mut last_tick: Option<Instant> = None;
+
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = line.map_err(|error| CliError::new(1, format!("stdin read failed: {error}")))?;
@@ -156,9 +160,13 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
             continue;
         }
 
+        let now = Instant::now();
+        let dt = last_tick.map_or(args.dt, |prev| now.duration_since(prev).as_secs_f64());
+        last_tick = Some(now);
+
         let pv = parse_f64_value("--stdin", trimmed)? * args.scale;
         let outcome = session
-            .process_pv(pv, args.dt, &mut sink)
+            .process_pv(pv, dt, &mut sink)
             .map_err(|error| CliError::new(1, error.to_string()))?;
 
         if let Some(reason) = outcome.d_term_skipped {
@@ -172,7 +180,7 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
         }
 
         if let Some(error) = outcome.state_write_failed {
-            emit_state_write_failure(&session, args.state_path.as_ref(), &mut log_file, &error);
+            emit_state_write_failure(&session, args.state_path.as_ref(), &mut log_file, &error, false);
         }
     }
 
@@ -278,11 +286,13 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         // Interval slip (plan: Reliability §10 — tick longer than configured `--interval`).
         let interval_secs = args.interval.as_secs_f64();
         if raw_dt > interval_secs {
-            eprintln!(
-                "interval slip: tick took {:.0}ms (interval: {:.0}ms)",
-                raw_dt * 1000.0,
-                interval_secs * 1000.0
-            );
+            if !args.quiet {
+                eprintln!(
+                    "interval slip: tick took {:.0}ms (interval: {:.0}ms)",
+                    raw_dt * 1000.0,
+                    interval_secs * 1000.0
+                );
+            }
             let interval_ms = millis_round_u64(interval_secs * 1000.0);
             let actual_ms = millis_round_u64(raw_dt * 1000.0);
             json_events::emit_interval_slip(&mut log_file, interval_ms, actual_ms);
@@ -293,6 +303,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
             args.min_dt,
             args.max_dt,
             args.dt_clamp,
+            args.quiet,
             &mut log_file,
         ) {
             MeasuredDt::Skip => {
@@ -301,6 +312,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
                     &session,
                     args.state_path.as_ref(),
                     &mut log_file,
+                    args.quiet,
                 );
                 continue;
             }
@@ -379,8 +391,16 @@ fn run_loop_tick(
                 let _ = writeln!(file, "{json}");
             }
 
+            if args.verbose {
+                let r = &outcome.record;
+                eprintln!(
+                    "iter={} pv={:.4} sp={:.4} err={:.4} cv={:.4} p={:.4} i={:.4} d={:.4}",
+                    r.iter, r.pv, r.sp, r.err, r.cv, r.p, r.i, r.d
+                );
+            }
+
             if let Some(error) = outcome.state_write_failed {
-                emit_state_write_failure(session, args.state_path.as_ref(), log_file, &error);
+                emit_state_write_failure(session, args.state_path.as_ref(), log_file, &error, args.quiet);
             }
         }
         Err(error) => {
@@ -449,6 +469,7 @@ pub(crate) fn apply_measured_dt(
     min_dt: f64,
     max_dt: f64,
     dt_clamp: bool,
+    quiet: bool,
     log: &mut Option<std::fs::File>,
 ) -> MeasuredDt {
     if raw_dt >= min_dt && raw_dt <= max_dt {
@@ -457,18 +478,22 @@ pub(crate) fn apply_measured_dt(
 
     if dt_clamp {
         let clamped = raw_dt.clamp(min_dt, max_dt);
-        if raw_dt < min_dt {
-            eprintln!("dt {raw_dt:.6}s below min_dt {min_dt:.6}s — clamping to min_dt");
-        } else {
-            eprintln!("dt {raw_dt:.6}s exceeds max_dt {max_dt:.6}s — clamping to max_dt");
+        if !quiet {
+            if raw_dt < min_dt {
+                eprintln!("dt {raw_dt:.6}s below min_dt {min_dt:.6}s — clamping to min_dt");
+            } else {
+                eprintln!("dt {raw_dt:.6}s exceeds max_dt {max_dt:.6}s — clamping to max_dt");
+            }
         }
         json_events::emit_dt_clamped(log, raw_dt, clamped);
         MeasuredDt::Use(clamped)
     } else {
-        if raw_dt < min_dt {
-            eprintln!("dt {raw_dt:.6}s below min_dt {min_dt:.6}s — skipping tick");
-        } else {
-            eprintln!("dt {raw_dt:.6}s exceeds max_dt {max_dt:.6}s — skipping tick");
+        if !quiet {
+            if raw_dt < min_dt {
+                eprintln!("dt {raw_dt:.6}s below min_dt {min_dt:.6}s — skipping tick");
+            } else {
+                eprintln!("dt {raw_dt:.6}s exceeds max_dt {max_dt:.6}s — skipping tick");
+            }
         }
         json_events::emit_dt_skipped(log, raw_dt, min_dt, max_dt);
         MeasuredDt::Skip
@@ -738,11 +763,12 @@ pub(crate) fn handle_dt_skip_state_write(
     session: &ControllerSession,
     state_path: Option<&std::path::PathBuf>,
     log_file: &mut Option<std::fs::File>,
+    quiet: bool,
 ) {
     let Some(err) = err else {
         return;
     };
-    emit_state_write_failure(session, state_path, log_file, &err);
+    emit_state_write_failure(session, state_path, log_file, &err, quiet);
 }
 
 /// Emits a state write failure — escalated warning if threshold reached, plain log otherwise.
@@ -751,17 +777,22 @@ pub(crate) fn emit_state_write_failure(
     state_path: Option<&std::path::PathBuf>,
     log_file: &mut Option<std::fs::File>,
     err: &pid_ctl::app::StateStoreError,
+    quiet: bool,
 ) {
     if let Some(path) = state_path {
         if session.state_fail_escalated() {
             let count = session.state_fail_count();
-            eprintln!("WARNING: state write failing persistently ({count} consecutive): {err}");
+            if !quiet {
+                eprintln!("WARNING: state write failing persistently ({count} consecutive): {err}");
+            }
             json_events::emit_state_write_escalated(log_file, path.clone(), err.to_string(), count);
         } else {
-            eprintln!("state write failed: {err}");
+            if !quiet {
+                eprintln!("state write failed: {err}");
+            }
             json_events::emit_state_write_failed(log_file, path.clone(), err.to_string());
         }
-    } else {
+    } else if !quiet {
         eprintln!("state write failed: {err}");
     }
 }
@@ -824,6 +855,15 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         ));
     }
 
+    // --format json and --cv-stdout conflict: both write to stdout (plan §Incompatible Flag Combinations).
+    if matches!(common.output_format, OutputFormat::Json)
+        && matches!(common.cv_sink, Some(CvSinkConfig::Stdout))
+    {
+        return Err(CliError::config(
+            "--format json and --cv-stdout are incompatible — JSON iteration records and raw CV values would corrupt stdout; use --log for machine-readable telemetry",
+        ));
+    }
+
     let mut cv_sink = common.cv_sink;
     if let Some(ref mut sink) = cv_sink {
         apply_cv_cmd_timeout(sink, common.cv_cmd_timeout);
@@ -834,16 +874,25 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         .loop_interval
         .ok_or_else(|| CliError::config("loop requires --interval"))?;
 
-    let pid_config = resolve_pid_config(&common.pid_flags, common.state_path.as_deref())?;
+    let mut pid_config = resolve_pid_config(&common.pid_flags, common.state_path.as_deref())?;
 
     // Default max_dt is 3×interval or 60.0 if interval is very large.
     let interval_secs = interval.as_secs_f64();
+
+    // Set tt_upper_bound from interval (plan §Anti-Windup: auto Tt clamped to [dt, 100×interval]).
+    // Only set if the user did not explicitly provide --anti-windup-tt (which bypasses auto-Tt entirely).
+    if common.pid_flags.anti_windup_tt.is_none() {
+        pid_config.tt_upper_bound = Some(100.0 * interval_secs);
+    }
     let max_dt_default = (interval_secs * 3.0).min(60.0);
     // Ensure max_dt_default is never below min_dt default (0.01).
     let max_dt_default = max_dt_default.max(0.01);
 
     let pv_stdin_timeout = common.pv_stdin_timeout.unwrap_or(interval);
-    let effective_cmd_timeout = common.cmd_timeout.unwrap_or(Duration::from_secs(5));
+    // Default cmd-timeout: min(interval, 30s) per plan §Command Timeouts.
+    let effective_cmd_timeout = common
+        .cmd_timeout
+        .unwrap_or_else(|| interval.min(Duration::from_secs(30)));
     let pv_cmd_timeout = common.pv_cmd_timeout.unwrap_or(effective_cmd_timeout);
 
     // Default state_write_interval for loop: max(tick_interval, 100ms).
@@ -888,6 +937,7 @@ fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         tune_step_sp: common.tune_step_sp.unwrap_or(0.1),
         units: common.units,
         quiet: common.quiet,
+        verbose: common.verbose,
         explicit_max_dt: common.explicit_max_dt,
         explicit_min_dt: common.explicit_min_dt,
         explicit_pv_stdin_timeout: common.explicit_pv_stdin_timeout,
@@ -1484,8 +1534,10 @@ fn resolve_pid_config(
         setpoint_ramp,
         slew_rate,
         pv_filter_alpha,
-        anti_windup: AntiWindupStrategy::BackCalculation,
-        anti_windup_tt: None,
+        anti_windup: flags
+            .anti_windup
+            .unwrap_or(AntiWindupStrategy::BackCalculation),
+        anti_windup_tt: flags.anti_windup_tt,
         tt_upper_bound: None,
     })
 }
@@ -1672,8 +1724,30 @@ fn handle_pid_option(
         "--slew-rate" => {
             parsed.pid_flags.slew_rate = Some(parse_f64_flag("--slew-rate", args, index)?);
         }
+        // --ramp-rate is a plan-documented alias for --slew-rate (plan §Safety uses --ramp-rate).
+        "--ramp-rate" => {
+            parsed.pid_flags.slew_rate = Some(parse_f64_flag("--ramp-rate", args, index)?);
+        }
         "--pv-filter" => {
             parsed.pid_flags.pv_filter_alpha = Some(parse_f64_flag("--pv-filter", args, index)?);
+        }
+        "--anti-windup" => {
+            let val = next_value("--anti-windup", args, index)?;
+            let strategy = match val.as_str() {
+                "back-calc" | "back-calculation" => AntiWindupStrategy::BackCalculation,
+                "clamp" => AntiWindupStrategy::Clamp,
+                "none" => AntiWindupStrategy::None,
+                other => {
+                    return Err(CliError::config(format!(
+                        "--anti-windup must be `back-calc`, `clamp`, or `none`, got `{other}`"
+                    )));
+                }
+            };
+            parsed.pid_flags.anti_windup = Some(strategy);
+        }
+        "--anti-windup-tt" => {
+            parsed.pid_flags.anti_windup_tt =
+                Some(parse_f64_flag("--anti-windup-tt", args, index)?);
         }
         _ => return Ok(false),
     }
@@ -1748,6 +1822,9 @@ fn handle_common_option(
         }
         "--quiet" => {
             parsed.quiet = true;
+        }
+        "--verbose" => {
+            parsed.verbose = true;
         }
         "--state-fail-after" => {
             parsed.state_fail_after = Some(parse_u32_flag("--state-fail-after", args, index)?);
@@ -1987,6 +2064,8 @@ struct PidFlags {
     setpoint_ramp: Option<f64>,
     slew_rate: Option<f64>,
     pv_filter_alpha: Option<f64>,
+    anti_windup: Option<AntiWindupStrategy>,
+    anti_windup_tt: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -2030,6 +2109,7 @@ struct CommonArgs {
     tune_step_sp: Option<f64>,
     units: Option<String>,
     quiet: bool,
+    verbose: bool,
     explicit_max_dt: bool,
     explicit_min_dt: bool,
     explicit_pv_stdin_timeout: bool,
@@ -2145,6 +2225,7 @@ pub(crate) struct LoopArgs {
     pub(crate) tune_step_sp: f64,
     pub(crate) units: Option<String>,
     pub(crate) quiet: bool,
+    pub(crate) verbose: bool,
     pub(crate) explicit_max_dt: bool,
     pub(crate) explicit_min_dt: bool,
     pub(crate) explicit_pv_stdin_timeout: bool,
