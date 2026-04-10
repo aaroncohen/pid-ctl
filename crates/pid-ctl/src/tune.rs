@@ -1367,13 +1367,16 @@ fn render_frame(
         body_chunks[0],
     );
 
+    // PV and CV sparklines each need Length(2): 1 row for the block title ("PV"/"CV") and
+    // 1 row for the sparkline bars. With Length(1), Block::inner() subtracts 1 for the title,
+    // leaving height=0 so ratatui renders nothing (the sparklines go missing).
     let hist_inner = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2),
+            Constraint::Length(2),
             Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Length(1),
             Constraint::Length(2),
         ])
@@ -1510,6 +1513,39 @@ mod tests {
         });
         let row = spark_marker_row(&serials, &ann, 5);
         assert_eq!(row.chars().nth(3), Some('|'));
+    }
+
+    /// Regression test for sparklines going missing after layout refactor.
+    ///
+    /// `Block::default().title(...)` eats 1 row for the title.  With a sparkline given
+    /// `Constraint::Length(1)` the inner height after `Block::inner()` becomes 0 and ratatui
+    /// early-exits without rendering any bars.  Each sparkline row must be at least Length(2).
+    #[test]
+    fn sparkline_constraints_are_at_least_2_rows() {
+        use ratatui::layout::Constraint;
+        // Minimum height required so Block::inner (which subtracts 1 for the title) still
+        // leaves ≥ 1 row for the sparkline bars.
+        const MIN_SPARK_ROWS: u16 = 2;
+        // Mirror the constraints used in render_frame's hist_inner layout.
+        // Indices 1 and 3 are the PV and CV sparklines respectively.
+        let constraints = [
+            Constraint::Length(2), // [0] history title
+            Constraint::Length(2), // [1] PV sparkline — must be ≥ MIN_SPARK_ROWS
+            Constraint::Length(1), // [2] PV marker row
+            Constraint::Length(2), // [3] CV sparkline — must be ≥ MIN_SPARK_ROWS
+            Constraint::Length(1), // [4] CV marker row
+            Constraint::Length(2), // [5] caret
+        ];
+        for idx in [1usize, 3] {
+            if let Constraint::Length(h) = constraints[idx] {
+                assert!(
+                    h >= MIN_SPARK_ROWS,
+                    "hist_inner[{idx}] (sparkline) has Length({h}) but needs ≥ {MIN_SPARK_ROWS}"
+                );
+            } else {
+                panic!("hist_inner[{idx}] is not a Length constraint");
+            }
+        }
     }
 
     #[test]
