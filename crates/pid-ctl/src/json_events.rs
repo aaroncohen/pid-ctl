@@ -42,74 +42,145 @@ impl Drop for StructuredJsonStderrGuard {
     }
 }
 
-#[derive(Serialize)]
-pub struct DtSkippedEvent {
-    pub schema_version: u64,
-    pub ts: String,
-    pub event: &'static str,
-    pub raw_dt: f64,
-    pub min_dt: f64,
-    pub max_dt: f64,
-}
-
-impl DtSkippedEvent {
-    #[must_use]
-    pub fn new(raw_dt: f64, min_dt: f64, max_dt: f64) -> Self {
-        Self {
-            schema_version: STATE_SCHEMA_VERSION,
-            ts: now_iso8601(),
-            event: "dt_skipped",
-            raw_dt,
-            min_dt,
-            max_dt,
+/// Generates a serialisable event struct with the common envelope fields
+/// (`schema_version`, `ts`, `event`) prepended, plus caller-supplied payload fields.
+///
+/// Also generates a free `emit_*` function that fills the envelope and calls `emit_line`.
+///
+/// Syntax:
+/// ```text
+/// event_struct! {
+///     StructName "event_name" emit_fn_name {
+///         field: Type,           // payload fields
+///         field: Type => expr,   // payload field with default from extra arg
+///     }
+/// }
+/// ```
+macro_rules! event_struct {
+    // Base case: struct with zero payload fields, emit fn with no extra args.
+    ($name:ident $event:literal $emit:ident {}) => {
+        #[derive(Serialize)]
+        pub struct $name {
+            pub schema_version: u64,
+            pub ts: String,
+            pub event: &'static str,
         }
-    }
-}
 
-#[derive(Serialize)]
-pub struct DtClampedEvent {
-    pub schema_version: u64,
-    pub ts: String,
-    pub event: &'static str,
-    pub raw_dt: f64,
-    pub clamped_dt: f64,
-}
-
-impl DtClampedEvent {
-    #[must_use]
-    pub fn new(raw_dt: f64, clamped_dt: f64) -> Self {
-        Self {
-            schema_version: STATE_SCHEMA_VERSION,
-            ts: now_iso8601(),
-            event: "dt_clamped",
-            raw_dt,
-            clamped_dt,
+        impl $name {
+            #[must_use]
+            pub fn new() -> Self {
+                Self {
+                    schema_version: STATE_SCHEMA_VERSION,
+                    ts: now_iso8601(),
+                    event: $event,
+                }
+            }
         }
-    }
-}
 
-#[derive(Serialize)]
-pub struct IntervalSlipEvent {
-    pub schema_version: u64,
-    pub ts: String,
-    pub event: &'static str,
-    pub interval_ms: u64,
-    pub actual_ms: u64,
-}
-
-impl IntervalSlipEvent {
-    #[must_use]
-    pub fn new(interval_ms: u64, actual_ms: u64) -> Self {
-        Self {
-            schema_version: STATE_SCHEMA_VERSION,
-            ts: now_iso8601(),
-            event: "interval_slip",
-            interval_ms,
-            actual_ms,
+        pub fn $emit(log: &mut Option<std::fs::File>) {
+            emit_line(log, &$name::new());
         }
-    }
+    };
+
+    // General case: struct with payload fields. The emit fn takes the same fields as args.
+    ($name:ident $event:literal $emit:ident {
+        $( $field:ident : $ty:ty ),+ $(,)?
+    }) => {
+        #[derive(Serialize)]
+        pub struct $name {
+            pub schema_version: u64,
+            pub ts: String,
+            pub event: &'static str,
+            $( pub $field: $ty, )+
+        }
+
+        impl $name {
+            #[must_use]
+            pub fn new($( $field: $ty ),+) -> Self {
+                Self {
+                    schema_version: STATE_SCHEMA_VERSION,
+                    ts: now_iso8601(),
+                    event: $event,
+                    $( $field, )+
+                }
+            }
+        }
+
+        pub fn $emit(log: &mut Option<std::fs::File>, $( $field: $ty ),+) {
+            emit_line(log, &$name::new($( $field ),+));
+        }
+    };
 }
 
+// ---------------------------------------------------------------------------
+// Event definitions
+// ---------------------------------------------------------------------------
+
+event_struct! { DtSkippedEvent "dt_skipped" emit_dt_skipped {
+    raw_dt: f64,
+    min_dt: f64,
+    max_dt: f64,
+}}
+
+event_struct! { DtClampedEvent "dt_clamped" emit_dt_clamped {
+    raw_dt: f64,
+    clamped_dt: f64,
+}}
+
+event_struct! { IntervalSlipEvent "interval_slip" emit_interval_slip {
+    interval_ms: u64,
+    actual_ms: u64,
+}}
+
+event_struct! { CvWriteFailedEvent "cv_write_failed" emit_cv_write_failed {
+    error: String,
+    consecutive_failures: u32,
+}}
+
+event_struct! { StateWriteFailedEvent "state_write_failed" emit_state_write_failed {
+    path: PathBuf,
+    error: String,
+}}
+
+event_struct! { StateWriteEscalatedEvent "state_write_escalated" emit_state_write_escalated {
+    path: PathBuf,
+    error: String,
+    consecutive_failures: u32,
+}}
+
+event_struct! { PvFailAfterReachedEvent "pv_fail_after_reached" emit_pv_fail_after_reached {
+    consecutive_failures: u32,
+    limit: u32,
+}}
+
+event_struct! { GainsChangedEvent "gains_changed" emit_gains_changed {
+    kp: f64,
+    ki: f64,
+    kd: f64,
+    sp: f64,
+    iter: u64,
+    source: &'static str,
+}}
+
+event_struct! { GainsSavedEvent "gains_saved" emit_gains_saved {
+    iter: u64,
+}}
+
+event_struct! { IntegralResetEvent "integral_reset" emit_integral_reset {
+    i_acc_before: f64,
+    iter: u64,
+    source: &'static str,
+}}
+
+event_struct! { SocketReadyEvent "socket_ready" emit_socket_ready {
+    path: PathBuf,
+}}
+
+// ---------------------------------------------------------------------------
+// Events with non-standard fields (not a clean fit for the macro)
+// ---------------------------------------------------------------------------
+
+/// PV read failure — has an optional `safe_cv` field (skipped when `None`).
 #[derive(Serialize)]
 pub struct PvReadFailureEvent {
     pub schema_version: u64,
@@ -133,62 +204,6 @@ impl PvReadFailureEvent {
     }
 }
 
-#[derive(Serialize)]
-pub struct CvWriteFailedEvent {
-    pub schema_version: u64,
-    pub ts: String,
-    pub event: &'static str,
-    pub error: String,
-    pub consecutive_failures: u32,
-}
-
-impl CvWriteFailedEvent {
-    #[must_use]
-    pub fn new(error: impl Into<String>, consecutive_failures: u32) -> Self {
-        Self {
-            schema_version: STATE_SCHEMA_VERSION,
-            ts: now_iso8601(),
-            event: "cv_write_failed",
-            error: error.into(),
-            consecutive_failures,
-        }
-    }
-}
-
-#[derive(Serialize)]
-pub struct StateWriteFailedEvent {
-    pub schema_version: u64,
-    pub ts: String,
-    pub event: &'static str,
-    pub path: PathBuf,
-    pub error: String,
-}
-
-impl StateWriteFailedEvent {
-    #[must_use]
-    pub fn new(path: PathBuf, error: impl Into<String>) -> Self {
-        Self {
-            schema_version: STATE_SCHEMA_VERSION,
-            ts: now_iso8601(),
-            event: "state_write_failed",
-            path,
-            error: error.into(),
-        }
-    }
-}
-
-pub fn emit_dt_skipped(log: &mut Option<std::fs::File>, raw_dt: f64, min_dt: f64, max_dt: f64) {
-    emit_line(log, &DtSkippedEvent::new(raw_dt, min_dt, max_dt));
-}
-
-pub fn emit_dt_clamped(log: &mut Option<std::fs::File>, raw_dt: f64, clamped_dt: f64) {
-    emit_line(log, &DtClampedEvent::new(raw_dt, clamped_dt));
-}
-
-pub fn emit_interval_slip(log: &mut Option<std::fs::File>, interval_ms: u64, actual_ms: u64) {
-    emit_line(log, &IntervalSlipEvent::new(interval_ms, actual_ms));
-}
-
 pub fn emit_pv_read_failure(
     log: &mut Option<std::fs::File>,
     error: impl Into<String>,
@@ -197,22 +212,7 @@ pub fn emit_pv_read_failure(
     emit_line(log, &PvReadFailureEvent::new(error, safe_cv));
 }
 
-pub fn emit_cv_write_failed(
-    log: &mut Option<std::fs::File>,
-    error: impl Into<String>,
-    consecutive_failures: u32,
-) {
-    emit_line(log, &CvWriteFailedEvent::new(error, consecutive_failures));
-}
-
-pub fn emit_state_write_failed(
-    log: &mut Option<std::fs::File>,
-    path: PathBuf,
-    error: impl Into<String>,
-) {
-    emit_line(log, &StateWriteFailedEvent::new(path, error));
-}
-
+/// D-term skipped event — payload uses `&'static str` reason derived from enum variant.
 #[derive(Serialize)]
 pub struct DTermSkippedEvent {
     pub schema_version: u64,
@@ -251,198 +251,6 @@ pub fn emit_d_term_skipped(
     iter: u64,
 ) {
     emit_line(log, &DTermSkippedEvent::new(reason_str(reason), iter));
-}
-
-#[derive(Serialize)]
-pub struct PvFailAfterReachedEvent {
-    pub schema_version: u64,
-    pub ts: String,
-    pub event: &'static str,
-    pub consecutive_failures: u32,
-    pub limit: u32,
-}
-
-impl PvFailAfterReachedEvent {
-    #[must_use]
-    pub fn new(consecutive_failures: u32, limit: u32) -> Self {
-        Self {
-            schema_version: STATE_SCHEMA_VERSION,
-            ts: now_iso8601(),
-            event: "pv_fail_after_reached",
-            consecutive_failures,
-            limit,
-        }
-    }
-}
-
-pub fn emit_pv_fail_after_reached(
-    log: &mut Option<std::fs::File>,
-    consecutive_failures: u32,
-    limit: u32,
-) {
-    emit_line(
-        log,
-        &PvFailAfterReachedEvent::new(consecutive_failures, limit),
-    );
-}
-
-#[derive(Serialize)]
-pub struct StateWriteEscalatedEvent {
-    pub schema_version: u64,
-    pub ts: String,
-    pub event: &'static str,
-    pub path: PathBuf,
-    pub error: String,
-    pub consecutive_failures: u32,
-}
-
-impl StateWriteEscalatedEvent {
-    #[must_use]
-    pub fn new(path: PathBuf, error: impl Into<String>, consecutive_failures: u32) -> Self {
-        Self {
-            schema_version: STATE_SCHEMA_VERSION,
-            ts: now_iso8601(),
-            event: "state_write_escalated",
-            path,
-            error: error.into(),
-            consecutive_failures,
-        }
-    }
-}
-
-pub fn emit_state_write_escalated(
-    log: &mut Option<std::fs::File>,
-    path: PathBuf,
-    error: impl Into<String>,
-    consecutive_failures: u32,
-) {
-    emit_line(
-        log,
-        &StateWriteEscalatedEvent::new(path, error, consecutive_failures),
-    );
-}
-
-#[derive(Serialize)]
-pub struct GainsChangedEvent {
-    pub schema_version: u64,
-    pub ts: String,
-    pub event: &'static str,
-    pub kp: f64,
-    pub ki: f64,
-    pub kd: f64,
-    pub sp: f64,
-    pub iter: u64,
-    pub source: &'static str,
-}
-
-impl GainsChangedEvent {
-    #[must_use]
-    pub fn new(kp: f64, ki: f64, kd: f64, sp: f64, iter: u64, source: &'static str) -> Self {
-        Self {
-            schema_version: STATE_SCHEMA_VERSION,
-            ts: now_iso8601(),
-            event: "gains_changed",
-            kp,
-            ki,
-            kd,
-            sp,
-            iter,
-            source,
-        }
-    }
-}
-
-pub fn emit_gains_changed(
-    log: &mut Option<std::fs::File>,
-    kp: f64,
-    ki: f64,
-    kd: f64,
-    sp: f64,
-    iter: u64,
-    source: &'static str,
-) {
-    emit_line(log, &GainsChangedEvent::new(kp, ki, kd, sp, iter, source));
-}
-
-#[derive(Serialize)]
-pub struct GainsSavedEvent {
-    pub schema_version: u64,
-    pub ts: String,
-    pub event: &'static str,
-    pub iter: u64,
-}
-
-impl GainsSavedEvent {
-    #[must_use]
-    pub fn new(iter: u64) -> Self {
-        Self {
-            schema_version: STATE_SCHEMA_VERSION,
-            ts: now_iso8601(),
-            event: "gains_saved",
-            iter,
-        }
-    }
-}
-
-pub fn emit_gains_saved(log: &mut Option<std::fs::File>, iter: u64) {
-    emit_line(log, &GainsSavedEvent::new(iter));
-}
-
-#[derive(Serialize)]
-pub struct IntegralResetEvent {
-    pub schema_version: u64,
-    pub ts: String,
-    pub event: &'static str,
-    pub i_acc_before: f64,
-    pub iter: u64,
-    pub source: &'static str,
-}
-
-impl IntegralResetEvent {
-    #[must_use]
-    pub fn new(i_acc_before: f64, iter: u64, source: &'static str) -> Self {
-        Self {
-            schema_version: STATE_SCHEMA_VERSION,
-            ts: now_iso8601(),
-            event: "integral_reset",
-            i_acc_before,
-            iter,
-            source,
-        }
-    }
-}
-
-pub fn emit_integral_reset(
-    log: &mut Option<std::fs::File>,
-    i_acc_before: f64,
-    iter: u64,
-    source: &'static str,
-) {
-    emit_line(log, &IntegralResetEvent::new(i_acc_before, iter, source));
-}
-
-#[derive(Serialize)]
-pub struct SocketReadyEvent {
-    pub schema_version: u64,
-    pub ts: String,
-    pub event: &'static str,
-    pub path: std::path::PathBuf,
-}
-
-impl SocketReadyEvent {
-    #[must_use]
-    pub fn new(path: std::path::PathBuf) -> Self {
-        Self {
-            schema_version: STATE_SCHEMA_VERSION,
-            ts: now_iso8601(),
-            event: "socket_ready",
-            path,
-        }
-    }
-}
-
-pub fn emit_socket_ready(log: &mut Option<std::fs::File>, path: std::path::PathBuf) {
-    emit_line(log, &SocketReadyEvent::new(path));
 }
 
 #[cfg(test)]
@@ -490,5 +298,35 @@ mod tests {
         assert_eq!(v["source"], "socket");
         // Must NOT contain gains_changed fields
         assert!(v.get("kp").is_none(), "kp should not be in integral_reset event");
+    }
+
+    #[test]
+    fn macro_generated_events_have_correct_envelope() {
+        let mut log = Some(tempfile::tempfile().unwrap());
+        emit_dt_skipped(&mut log, 0.6, 0.1, 0.5);
+        let mut f = log.unwrap();
+        let mut s = String::new();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.read_to_string(&mut s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+        assert_eq!(v["event"], "dt_skipped");
+        assert!(v["schema_version"].is_number());
+        assert!(v["ts"].is_string());
+        assert_eq!(v["raw_dt"], 0.6);
+        assert_eq!(v["min_dt"], 0.1);
+        assert_eq!(v["max_dt"], 0.5);
+    }
+
+    #[test]
+    fn pv_read_failure_safe_cv_skipped_when_none() {
+        let mut log = Some(tempfile::tempfile().unwrap());
+        emit_pv_read_failure(&mut log, "timeout", None);
+        let mut f = log.unwrap();
+        let mut s = String::new();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.read_to_string(&mut s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+        assert_eq!(v["event"], "pv_read_failure");
+        assert!(v.get("safe_cv").is_none(), "safe_cv should be absent when None");
     }
 }
