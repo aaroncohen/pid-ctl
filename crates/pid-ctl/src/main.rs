@@ -69,10 +69,15 @@ fn run(args: &[String], #[cfg_attr(not(feature = "tui"), allow(unused_variables)
             let flags = parse_status_flags(rest)?;
             run_status_dispatch(&flags)
         }
+        #[cfg(unix)]
         "set" => run_socket_set(rest),
+        #[cfg(unix)]
         "hold" => run_socket_hold(rest),
+        #[cfg(unix)]
         "resume" => run_socket_resume(rest),
+        #[cfg(unix)]
         "reset" => run_socket_reset(rest),
+        #[cfg(unix)]
         "save" => run_socket_save(rest),
         "purge" => {
             let state_path = parse_state_flag(rest, "purge")?;
@@ -216,6 +221,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
     let mut log_file = open_log_optional(args.log_path.as_deref())?;
 
     // Bind socket listener when --socket is set.
+    #[cfg(unix)]
     let socket_listener = if let Some(ref path) = args.socket_path {
         let listener =
             pid_ctl::socket::SocketListener::bind(path, args.socket_mode).map_err(|e| match e {
@@ -256,6 +262,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         // Sleep until next deadline, servicing socket if active.
         let now = Instant::now();
         if now < next_deadline {
+            #[cfg(unix)]
             if let Some(ref listener) = socket_listener {
                 sleep_with_socket(
                     next_deadline,
@@ -269,6 +276,8 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
             } else {
                 std::thread::sleep(next_deadline - now);
             }
+            #[cfg(not(unix))]
+            std::thread::sleep(next_deadline - now);
         }
 
         // Check shutdown again after sleeping (signal may have arrived during sleep).
@@ -586,6 +595,7 @@ pub(crate) fn apply_runtime_interval(
     Ok(())
 }
 
+#[cfg(unix)]
 /// Side effects that a socket command may request the loop to apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SocketSideEffect {
@@ -595,6 +605,7 @@ pub(crate) enum SocketSideEffect {
     IntervalChanged,
 }
 
+#[cfg(unix)]
 /// Dispatches a socket [`Request`] against the live controller session and
 /// returns a JSON [`Response`] plus any side effect for the loop to apply.
 pub(crate) fn handle_socket_request(
@@ -664,6 +675,7 @@ pub(crate) fn handle_socket_request(
     }
 }
 
+#[cfg(unix)]
 fn handle_socket_set(
     param: &str,
     value: f64,
@@ -730,6 +742,7 @@ fn handle_socket_set(
     }
 }
 
+#[cfg(unix)]
 /// Sleeps until `until` in 50ms chunks, servicing socket connections between chunks.
 fn sleep_with_socket(
     until: Instant,
@@ -960,7 +973,8 @@ fn run_init(state_path: &std::path::Path) -> Result<(), CliError> {
 }
 
 fn run_status_dispatch(flags: &StatusFlags) -> Result<(), CliError> {
-    // Try socket first if provided.
+    // Try socket first if provided (Unix only).
+    #[cfg(unix)]
     if let Some(ref socket_path) = flags.socket_path {
         match pid_ctl::socket::client_request(socket_path, &pid_ctl::socket::Request::Status) {
             Ok(response) => {
@@ -999,9 +1013,10 @@ fn run_status_dispatch(flags: &StatusFlags) -> Result<(), CliError> {
 }
 
 // ---------------------------------------------------------------------------
-// Socket control subcommands: set, hold, resume, reset, save
+// Socket control subcommands: set, hold, resume, reset, save  (Unix only)
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 /// Send a socket request, print the JSON response to stdout, and exit non-zero when `ok` is false.
 fn socket_send_and_print(
     socket_path: &Path,
@@ -1031,26 +1046,31 @@ fn socket_send_and_print(
     }
 }
 
+#[cfg(unix)]
 fn run_socket_hold(args: &[String]) -> Result<(), CliError> {
     let path = parse_socket_control_flag(args, "hold")?;
     socket_send_and_print(&path, &pid_ctl::socket::Request::Hold, "hold")
 }
 
+#[cfg(unix)]
 fn run_socket_resume(args: &[String]) -> Result<(), CliError> {
     let path = parse_socket_control_flag(args, "resume")?;
     socket_send_and_print(&path, &pid_ctl::socket::Request::Resume, "resume")
 }
 
+#[cfg(unix)]
 fn run_socket_reset(args: &[String]) -> Result<(), CliError> {
     let path = parse_socket_control_flag(args, "reset")?;
     socket_send_and_print(&path, &pid_ctl::socket::Request::Reset, "reset")
 }
 
+#[cfg(unix)]
 fn run_socket_save(args: &[String]) -> Result<(), CliError> {
     let path = parse_socket_control_flag(args, "save")?;
     socket_send_and_print(&path, &pid_ctl::socket::Request::Save, "save")
 }
 
+#[cfg(unix)]
 fn run_socket_set(args: &[String]) -> Result<(), CliError> {
     let parsed = parse_set_args(args)?;
     let req = pid_ctl::socket::Request::Set {

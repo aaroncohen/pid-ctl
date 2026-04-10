@@ -9,4 +9,5 @@ pub mod adapters;
 pub mod app;
 pub mod json_events;
 pub mod schedule;
+#[cfg(unix)]
 pub mod socket;

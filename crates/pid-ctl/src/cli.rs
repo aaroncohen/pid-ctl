@@ -88,7 +88,9 @@ pub(crate) struct CommonArgs {
     pub(crate) explicit_min_dt: bool,
     pub(crate) explicit_pv_stdin_timeout: bool,
     pub(crate) explicit_state_write_interval: bool,
+    #[cfg(unix)]
     pub(crate) socket_path: Option<PathBuf>,
+    #[cfg(unix)]
     pub(crate) socket_mode: Option<u32>,
 }
 
@@ -194,7 +196,9 @@ pub(crate) struct LoopArgs {
     pub(crate) explicit_min_dt: bool,
     pub(crate) explicit_pv_stdin_timeout: bool,
     pub(crate) explicit_state_write_interval: bool,
+    #[cfg(unix)]
     pub(crate) socket_path: Option<PathBuf>,
+    #[cfg(unix)]
     pub(crate) socket_mode: u32,
 }
 
@@ -234,6 +238,7 @@ pub(crate) enum CvSinkConfig {
     },
 }
 
+#[cfg(unix)]
 pub(crate) struct SetArgs {
     pub(crate) socket_path: PathBuf,
     pub(crate) param: String,
@@ -242,6 +247,7 @@ pub(crate) struct SetArgs {
 
 pub(crate) struct StatusFlags {
     pub(crate) state_path: Option<PathBuf>,
+    #[cfg(unix)]
     pub(crate) socket_path: Option<PathBuf>,
 }
 
@@ -293,6 +299,7 @@ pub(crate) fn parse_state_flag(args: &[String], command: &str) -> Result<PathBuf
 
 pub(crate) fn parse_status_flags(args: &[String]) -> Result<StatusFlags, CliError> {
     let mut state_path = None;
+    #[cfg(unix)]
     let mut socket_path = None;
     let mut i = 0;
     while i < args.len() {
@@ -304,6 +311,7 @@ pub(crate) fn parse_status_flags(args: &[String]) -> Result<StatusFlags, CliErro
                     .ok_or_else(|| CliError::config("--state requires a value"))?;
                 state_path = Some(PathBuf::from(val));
             }
+            #[cfg(unix)]
             "--socket" => {
                 i += 1;
                 let val = args
@@ -324,18 +332,25 @@ pub(crate) fn parse_status_flags(args: &[String]) -> Result<StatusFlags, CliErro
         }
         i += 1;
     }
+    #[cfg(unix)]
     if state_path.is_none() && socket_path.is_none() {
         return Err(CliError::config(
             "status requires --state or --socket (or both)",
         ));
     }
+    #[cfg(not(unix))]
+    if state_path.is_none() {
+        return Err(CliError::config("status requires --state"));
+    }
     Ok(StatusFlags {
         state_path,
+        #[cfg(unix)]
         socket_path,
     })
 }
 
 /// Parse the `--socket <path>` flag required by socket-control subcommands.
+#[cfg(unix)]
 pub(crate) fn parse_socket_control_flag(args: &[String], cmd: &str) -> Result<PathBuf, CliError> {
     let mut socket_path = None;
     let mut i = 0;
@@ -364,6 +379,7 @@ pub(crate) fn parse_socket_control_flag(args: &[String], cmd: &str) -> Result<Pa
     socket_path.ok_or_else(|| CliError::config(format!("{cmd} requires --socket <path>")))
 }
 
+#[cfg(unix)]
 pub(crate) fn parse_set_args(args: &[String]) -> Result<SetArgs, CliError> {
     let mut socket_path = None;
     let mut param: Option<String> = None;
@@ -636,7 +652,9 @@ pub(crate) fn parse_loop(args: &[String]) -> Result<LoopArgs, CliError> {
         explicit_min_dt: common.explicit_min_dt,
         explicit_pv_stdin_timeout: common.explicit_pv_stdin_timeout,
         explicit_state_write_interval: common.explicit_state_write_interval,
+        #[cfg(unix)]
         socket_path: common.socket_path,
+        #[cfg(unix)]
         socket_mode: common.socket_mode.unwrap_or(0o600),
     })
 }
@@ -851,10 +869,12 @@ pub(crate) fn handle_loop_only_option(
             parsed.tune_step_sp = Some(parse_f64_flag("--tune-step-sp", args, index)?);
             Ok(true)
         }
+        #[cfg(unix)]
         "--socket" => {
             parsed.socket_path = Some(parse_path_flag("--socket", args, index)?);
             Ok(true)
         }
+        #[cfg(unix)]
         "--socket-mode" => {
             let val = next_value("--socket-mode", args, index)?;
             let mode = u32::from_str_radix(&val, 8).map_err(|_| {
