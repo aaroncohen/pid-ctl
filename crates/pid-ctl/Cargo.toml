@@ -11,6 +11,7 @@ categories.workspace = true
 
 [dependencies]
 pid-ctl-core = { path = "../pid-ctl-core" }
+clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 fs2.workspace = true

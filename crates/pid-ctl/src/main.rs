@@ -1,8 +1,10 @@
 #[cfg(feature = "tui")]
 mod tune;
 mod cli;
+#[allow(clippy::wildcard_imports)]
 pub(crate) use cli::*;
 
+use clap::{Parser, Subcommand};
 use pid_ctl::adapters::{
     CmdCvSink, CmdPvSource, CvSink, DryRunCvSink, FileCvSink, FilePvSource, PvSource,
     StdinPvSource, StdoutCvSink,
@@ -10,7 +12,6 @@ use pid_ctl::adapters::{
 use pid_ctl::app::{self, ControllerSession, StateSnapshot, StateStore};
 use pid_ctl::json_events;
 use pid_ctl::schedule::next_deadline_after_tick;
-use std::env;
 use std::fmt;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -19,10 +20,101 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+// ---------------------------------------------------------------------------
+// clap top-level CLI definition (thin wrapper — args are passed through to
+// the existing hand-rolled parsing functions in cli.rs)
+// ---------------------------------------------------------------------------
+
+#[derive(Parser)]
+#[command(name = "pid-ctl", about = "PID loop controller", disable_help_subcommand = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: SubCommand,
+}
+
+#[derive(Subcommand)]
+enum SubCommand {
+    /// Run one PID tick and exit
+    Once {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run a continuous PID control loop
+    Loop {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Read PV lines from stdin and emit CV to stdout
+    Pipe {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Show controller status
+    Status {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Send a set command via socket
+    #[cfg(unix)]
+    Set {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Send a hold command via socket
+    #[cfg(unix)]
+    Hold {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Send a resume command via socket
+    #[cfg(unix)]
+    Resume {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Send a reset command via socket
+    #[cfg(unix)]
+    Reset {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Send a save command via socket
+    #[cfg(unix)]
+    Save {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Purge persisted state file
+    Purge {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Initialise a new state file
+    Init {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
 fn main() {
-    let full_argv: Vec<String> = env::args().collect();
-    let args: Vec<String> = env::args().skip(1).collect();
-    let exit_code = match run(&args, &full_argv) {
+    let full_argv: Vec<String> = std::env::args().collect();
+
+    let cli = Cli::try_parse().unwrap_or_else(|e| {
+        // --help and --version print to stdout and exit 0 (normal clap behaviour).
+        // All other parse errors are config errors → exit 3 (same as hand-rolled parser).
+        match e.kind() {
+            clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
+                print!("{e}");
+                process::exit(0);
+            }
+            _ => {
+                eprintln!("{e}");
+                process::exit(3);
+            }
+        }
+    });
+
+    let exit_code = match run(cli, &full_argv) {
         Ok(()) => 0,
         Err(error) => {
             if !error.message.is_empty() {
@@ -35,24 +127,21 @@ fn main() {
     process::exit(exit_code);
 }
 
-fn run(args: &[String], #[cfg_attr(not(feature = "tui"), allow(unused_variables))] full_argv: &[String]) -> Result<(), CliError> {
-    let Some((command, rest)) = args.split_first() else {
-        return Err(CliError::config(
-            "usage: pid-ctl <once|loop|pipe|status|set|hold|resume|reset|save|purge|init> [OPTIONS]",
-        ));
-    };
-
-    match command.as_str() {
-        "once" => {
-            let parsed = parse_once(rest)?;
+fn run(
+    cli: Cli,
+    #[cfg_attr(not(feature = "tui"), allow(unused_variables))] full_argv: &[String],
+) -> Result<(), CliError> {
+    match cli.command {
+        SubCommand::Once { args } => {
+            let parsed = parse_once(&args)?;
             run_once(&parsed)
         }
-        "pipe" => {
-            let parsed = parse_pipe(rest)?;
+        SubCommand::Pipe { args } => {
+            let parsed = parse_pipe(&args)?;
             run_pipe(&parsed)
         }
-        "loop" => {
-            let mut parsed = parse_loop(rest)?;
+        SubCommand::Loop { args } => {
+            let mut parsed = parse_loop(&args)?;
             #[cfg(feature = "tui")]
             if parsed.tune {
                 return tune::run(parsed, full_argv);
@@ -65,31 +154,28 @@ fn run(args: &[String], #[cfg_attr(not(feature = "tui"), allow(unused_variables)
             }
             run_loop(&mut parsed)
         }
-        "status" => {
-            let flags = parse_status_flags(rest)?;
+        SubCommand::Status { args } => {
+            let flags = parse_status_flags(&args)?;
             run_status_dispatch(&flags)
         }
         #[cfg(unix)]
-        "set" => run_socket_set(rest),
+        SubCommand::Set { args } => run_socket_set(&args),
         #[cfg(unix)]
-        "hold" => run_socket_hold(rest),
+        SubCommand::Hold { args } => run_socket_hold(&args),
         #[cfg(unix)]
-        "resume" => run_socket_resume(rest),
+        SubCommand::Resume { args } => run_socket_resume(&args),
         #[cfg(unix)]
-        "reset" => run_socket_reset(rest),
+        SubCommand::Reset { args } => run_socket_reset(&args),
         #[cfg(unix)]
-        "save" => run_socket_save(rest),
-        "purge" => {
-            let state_path = parse_state_flag(rest, "purge")?;
+        SubCommand::Save { args } => run_socket_save(&args),
+        SubCommand::Purge { args } => {
+            let state_path = parse_state_flag(&args, "purge")?;
             run_purge(&state_path)
         }
-        "init" => {
-            let state_path = parse_state_flag(rest, "init")?;
+        SubCommand::Init { args } => {
+            let state_path = parse_state_flag(&args, "init")?;
             run_init(&state_path)
         }
-        other => Err(CliError::config(format!(
-            "unknown subcommand `{other}`; expected `once`, `pipe`, `loop`, `status`, `set`, `hold`, `resume`, `reset`, `save`, `purge`, or `init`"
-        ))),
     }
 }
 
