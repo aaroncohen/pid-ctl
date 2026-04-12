@@ -4,15 +4,33 @@ use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use wait_timeout::ChildExt;
+/// Wait for `child` to exit or until `dur` elapses.
+///
+/// Implemented with [`Child::try_wait`] polling so we do not install a process-global
+/// `SIGCHLD` handler. The `wait-timeout` crate registers such a handler; under
+/// `cargo test` on Linux that can interact badly with the test harness and parallel
+/// tests, causing waits to block until the subprocess actually exits (timeouts
+/// ineffective).
+fn wait_child_deadline(child: &mut Child, dur: Duration) -> io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + dur;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
 
 /// Destination for computed controller output values.
 pub trait CvSink {
@@ -221,30 +239,21 @@ impl PvSource for CmdPvSource {
             Ok(s)
         });
 
-        let outcome = child.wait_timeout(self.timeout);
-        let (status, output) = match outcome {
-            Ok(Some(status)) => {
-                let output = join_stdout_reader(reader)?;
-                (status, output)
-            }
-            Ok(None) => {
-                kill_child_process_tree(&mut child);
-                let _ = child.wait();
-                let _ = join_stdout_reader(reader);
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "PV command timed out after {:?}: `{}`",
-                        self.timeout, self.command
-                    ),
-                ));
-            }
-            Err(e) => {
-                kill_child_process_tree(&mut child);
-                let _ = child.wait();
-                let _ = join_stdout_reader(reader);
-                return Err(e);
-            }
+        let outcome = wait_child_deadline(&mut child, self.timeout)?;
+        let (status, output) = if let Some(status) = outcome {
+            let output = join_stdout_reader(reader)?;
+            (status, output)
+        } else {
+            kill_child_process_tree(&mut child);
+            let _ = child.wait();
+            let _ = join_stdout_reader(reader);
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "PV command timed out after {:?}: `{}`",
+                    self.timeout, self.command
+                ),
+            ));
         };
 
         if !status.success() {
@@ -422,51 +431,43 @@ impl CvSink for CmdCvSink {
         let mut child = cmd.spawn()?;
         let stderr_pipe = child.stderr.take();
 
-        let outcome = child.wait_timeout(self.timeout);
-        match outcome {
-            Ok(Some(status)) => {
-                let mut err_text = String::new();
-                if let Some(mut s) = stderr_pipe {
-                    let _ = Read::read_to_string(&mut s, &mut err_text);
-                }
-                if status.success() {
-                    Ok(())
-                } else {
-                    let detail = err_text.trim();
-                    let msg = if detail.is_empty() {
-                        format!("CV command exited with {status}: {command}")
-                    } else {
-                        format!("CV command exited with {status}: {command}\nstderr: {detail}")
-                    };
-                    Err(io::Error::other(msg))
-                }
+        let outcome = wait_child_deadline(&mut child, self.timeout)?;
+        if let Some(status) = outcome {
+            let mut err_text = String::new();
+            if let Some(mut s) = stderr_pipe {
+                let _ = Read::read_to_string(&mut s, &mut err_text);
             }
-            Ok(None) => {
-                kill_child_process_tree(&mut child);
-                let _ = child.wait();
-                let mut err_text = String::new();
-                if let Some(mut s) = stderr_pipe {
-                    let _ = Read::read_to_string(&mut s, &mut err_text);
-                }
+            if status.success() {
+                Ok(())
+            } else {
                 let detail = err_text.trim();
-                let tail = if detail.is_empty() {
-                    String::new()
+                let msg = if detail.is_empty() {
+                    format!("CV command exited with {status}: {command}")
                 } else {
-                    format!("\nstderr: {detail}")
+                    format!("CV command exited with {status}: {command}\nstderr: {detail}")
                 };
-                Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "CV command timed out after {:?}: `{command}`{tail}",
-                        self.timeout
-                    ),
-                ))
+                Err(io::Error::other(msg))
             }
-            Err(e) => {
-                kill_child_process_tree(&mut child);
-                let _ = child.wait();
-                Err(e)
+        } else {
+            kill_child_process_tree(&mut child);
+            let _ = child.wait();
+            let mut err_text = String::new();
+            if let Some(mut s) = stderr_pipe {
+                let _ = Read::read_to_string(&mut s, &mut err_text);
             }
+            let detail = err_text.trim();
+            let tail = if detail.is_empty() {
+                String::new()
+            } else {
+                format!("\nstderr: {detail}")
+            };
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "CV command timed out after {:?}: `{command}`{tail}",
+                    self.timeout
+                ),
+            ))
         }
     }
 }
