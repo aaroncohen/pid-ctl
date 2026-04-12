@@ -1,6 +1,6 @@
+mod cli;
 #[cfg(feature = "tui")]
 mod tune;
-mod cli;
 #[allow(clippy::wildcard_imports)]
 pub(crate) use cli::*;
 
@@ -93,13 +93,13 @@ fn run(
         #[cfg(unix)]
         SubCommand::Save(raw) => run_socket_save(&raw),
         SubCommand::Purge(raw) => {
-            let state_path = get_state_path(&raw)
-                .map_err(|_| CliError::config("purge requires --state"))?;
+            let state_path =
+                get_state_path(&raw).map_err(|_| CliError::config("purge requires --state"))?;
             run_purge(&state_path)
         }
         SubCommand::Init(raw) => {
-            let state_path = get_state_path(&raw)
-                .map_err(|_| CliError::config("init requires --state"))?;
+            let state_path =
+                get_state_path(&raw).map_err(|_| CliError::config("init requires --state"))?;
             run_init(&state_path)
         }
     }
@@ -205,7 +205,13 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
         }
 
         if let Some(error) = outcome.state_write_failed {
-            emit_state_write_failure(&session, args.state_path.as_ref(), &mut log_file, &error, false);
+            emit_state_write_failure(
+                &session,
+                args.state_path.as_ref(),
+                &mut log_file,
+                &error,
+                false,
+            );
         }
     }
 
@@ -429,7 +435,13 @@ fn run_loop_tick(
             }
 
             if let Some(error) = outcome.state_write_failed {
-                emit_state_write_failure(session, args.state_path.as_ref(), log_file, &error, args.quiet);
+                emit_state_write_failure(
+                    session,
+                    args.state_path.as_ref(),
+                    log_file,
+                    &error,
+                    args.quiet,
+                );
             }
         }
         Err(error) => {
@@ -441,9 +453,7 @@ fn run_loop_tick(
                 write_safe_cv(args.safe_cv, cv_sink, session);
                 return Err(CliError::new(
                     2,
-                    format!(
-                        "exiting after {cv_fail_count} consecutive CV write failures: {error}"
-                    ),
+                    format!("exiting after {cv_fail_count} consecutive CV write failures: {error}"),
                 ));
             }
         }
@@ -660,14 +670,28 @@ pub(crate) fn handle_socket_request(
                 SocketSideEffect::None,
             )
         }
-        Request::Hold => (Response::Ack { ok: true, error: None }, SocketSideEffect::Hold),
-        Request::Resume => (Response::Ack { ok: true, error: None }, SocketSideEffect::Resume),
+        Request::Hold => (
+            Response::Ack {
+                ok: true,
+                error: None,
+            },
+            SocketSideEffect::Hold,
+        ),
+        Request::Resume => (
+            Response::Ack {
+                ok: true,
+                error: None,
+            },
+            SocketSideEffect::Resume,
+        ),
         Request::Save => {
             if !session.has_state_store() {
                 return (
                     Response::Ack {
                         ok: false,
-                        error: Some(String::from("no state store: loop was not started with --state")),
+                        error: Some(String::from(
+                            "no state store: loop was not started with --state",
+                        )),
                     },
                     SocketSideEffect::None,
                 );
@@ -681,7 +705,13 @@ pub(crate) fn handle_socket_request(
                     SocketSideEffect::None,
                 )
             } else {
-                (Response::Ack { ok: true, error: None }, SocketSideEffect::None)
+                (
+                    Response::Ack {
+                        ok: true,
+                        error: None,
+                    },
+                    SocketSideEffect::None,
+                )
             }
         }
     }
@@ -711,37 +741,113 @@ fn handle_socket_set(
         "kp" => {
             let old = session.config().kp;
             session.set_gains(value, session.config().ki, session.config().kd);
-            json_events::emit_gains_changed(log_file, value, session.config().ki, session.config().kd, session.config().setpoint, session.iter(), "socket");
-            (Response::Set { ok: true, param: String::from("kp"), old, new: value }, SocketSideEffect::None)
+            json_events::emit_gains_changed(
+                log_file,
+                value,
+                session.config().ki,
+                session.config().kd,
+                session.config().setpoint,
+                session.iter(),
+                "socket",
+            );
+            (
+                Response::Set {
+                    ok: true,
+                    param: String::from("kp"),
+                    old,
+                    new: value,
+                },
+                SocketSideEffect::None,
+            )
         }
         "ki" => {
             let old = session.config().ki;
             session.set_gains(session.config().kp, value, session.config().kd);
-            json_events::emit_gains_changed(log_file, session.config().kp, value, session.config().kd, session.config().setpoint, session.iter(), "socket");
-            (Response::Set { ok: true, param: String::from("ki"), old, new: value }, SocketSideEffect::None)
+            json_events::emit_gains_changed(
+                log_file,
+                session.config().kp,
+                value,
+                session.config().kd,
+                session.config().setpoint,
+                session.iter(),
+                "socket",
+            );
+            (
+                Response::Set {
+                    ok: true,
+                    param: String::from("ki"),
+                    old,
+                    new: value,
+                },
+                SocketSideEffect::None,
+            )
         }
         "kd" => {
             let old = session.config().kd;
             session.set_gains(session.config().kp, session.config().ki, value);
-            json_events::emit_gains_changed(log_file, session.config().kp, session.config().ki, value, session.config().setpoint, session.iter(), "socket");
-            (Response::Set { ok: true, param: String::from("kd"), old, new: value }, SocketSideEffect::None)
+            json_events::emit_gains_changed(
+                log_file,
+                session.config().kp,
+                session.config().ki,
+                value,
+                session.config().setpoint,
+                session.iter(),
+                "socket",
+            );
+            (
+                Response::Set {
+                    ok: true,
+                    param: String::from("kd"),
+                    old,
+                    new: value,
+                },
+                SocketSideEffect::None,
+            )
         }
         "sp" => {
             let old = session.config().setpoint;
             session.set_setpoint(value);
-            json_events::emit_gains_changed(log_file, session.config().kp, session.config().ki, session.config().kd, value, session.iter(), "socket");
-            (Response::Set { ok: true, param: String::from("sp"), old, new: value }, SocketSideEffect::None)
+            json_events::emit_gains_changed(
+                log_file,
+                session.config().kp,
+                session.config().ki,
+                session.config().kd,
+                value,
+                session.iter(),
+                "socket",
+            );
+            (
+                Response::Set {
+                    ok: true,
+                    param: String::from("sp"),
+                    old,
+                    new: value,
+                },
+                SocketSideEffect::None,
+            )
         }
         "interval" => {
             let old = args.interval.as_secs_f64();
             let new_interval = Duration::from_secs_f64(value);
             if let Err(e) = apply_runtime_interval(session, args, new_interval) {
                 return (
-                    Response::ErrorUnknownCommand { ok: false, error: format!("interval change failed: {e}"), available: vec![] },
+                    Response::ErrorUnknownCommand {
+                        ok: false,
+                        error: format!("interval change failed: {e}"),
+                        available: vec![],
+                    },
                     SocketSideEffect::None,
                 );
             }
-            (Response::Set { ok: true, param: String::from("interval"), old, new: value }, SocketSideEffect::IntervalChanged)
+            (
+                Response::Set {
+                    ok: true,
+                    param: String::from("interval"),
+                    old,
+                    new: value,
+                },
+                SocketSideEffect::IntervalChanged,
+            )
         }
         _ => (
             Response::ErrorUnknownParam {
@@ -783,7 +889,7 @@ fn sleep_with_socket(
                 }
                 resp
             }) {
-                Ok(Some(())) => {},
+                Ok(Some(())) => {}
                 _ => break,
             }
         }

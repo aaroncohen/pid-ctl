@@ -150,7 +150,10 @@ mod tests {
 
     #[test]
     fn first_order_converges_to_gain_times_cv() {
-        let p = FirstOrderParams { tau: 1.0, gain: 2.0 };
+        let p = FirstOrderParams {
+            tau: 1.0,
+            gain: 2.0,
+        };
         let mut x = 0.0;
         let dt = 0.1;
         for _ in 0..200 {

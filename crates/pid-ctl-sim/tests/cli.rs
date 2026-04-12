@@ -2,7 +2,7 @@
 
 use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin;
-use pid_ctl_sim::{load_state, Plant, SimState, SCHEMA_VERSION};
+use pid_ctl_sim::{Plant, SCHEMA_VERSION, SimState, load_state};
 use tempfile::tempdir;
 
 #[test]
@@ -32,11 +32,7 @@ fn init_print_apply_roundtrip_first_order() {
     assert!(matches!(s.plant, Plant::FirstOrder { .. }));
 
     Command::new(cargo_bin("pid-ctl-sim"))
-        .args([
-            "print-pv",
-            "--state",
-            state.to_str().expect("utf8"),
-        ])
+        .args(["print-pv", "--state", state.to_str().expect("utf8")])
         .assert()
         .success()
         .stdout("0\n");
@@ -55,11 +51,7 @@ fn init_print_apply_roundtrip_first_order() {
         .success();
 
     let out = Command::new(cargo_bin("pid-ctl-sim"))
-        .args([
-            "print-pv",
-            "--state",
-            state.to_str().expect("utf8"),
-        ])
+        .args(["print-pv", "--state", state.to_str().expect("utf8")])
         .output()
         .expect("print-pv");
     assert!(out.status.success());
@@ -107,18 +99,17 @@ fn rejects_bad_schema_version() {
     let sim = SimState {
         schema_version: 999,
         plant: Plant::FirstOrder {
-            params: pid_ctl_sim::FirstOrderParams { tau: 1.0, gain: 1.0 },
+            params: pid_ctl_sim::FirstOrderParams {
+                tau: 1.0,
+                gain: 1.0,
+            },
             x: 0.0,
         },
     };
     pid_ctl_sim::save_state(&state, &sim).expect("save");
 
     Command::new(cargo_bin("pid-ctl-sim"))
-        .args([
-            "print-pv",
-            "--state",
-            state.to_str().expect("utf8"),
-        ])
+        .args(["print-pv", "--state", state.to_str().expect("utf8")])
         .assert()
         .failure();
 }

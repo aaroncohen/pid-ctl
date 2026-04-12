@@ -49,9 +49,9 @@ mod state;
 
 pub use persist::{load as load_state, save as save_state};
 pub use plant::{
-    step_fan, step_first_order, step_thermal, FanParams, FirstOrderParams, ThermalParams,
+    FanParams, FirstOrderParams, ThermalParams, step_fan, step_first_order, step_thermal,
 };
-pub use state::{Plant, SimState, SCHEMA_VERSION};
+pub use state::{Plant, SCHEMA_VERSION, SimState};
 
 use std::fmt;
 use std::io;

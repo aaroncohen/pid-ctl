@@ -31,7 +31,7 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use pid_ctl_sim::{
-    FanParams, FirstOrderParams, Plant, SimError, SimState, ThermalParams, SCHEMA_VERSION,
+    FanParams, FirstOrderParams, Plant, SCHEMA_VERSION, SimError, SimState, ThermalParams,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -40,7 +40,11 @@ use std::path::PathBuf;
 use std::process::exit;
 
 #[derive(Parser)]
-#[command(name = "pid-ctl-sim", version, about = "Simulated plants for pid-ctl loop / tuning")]
+#[command(
+    name = "pid-ctl-sim",
+    version,
+    about = "Simulated plants for pid-ctl loop / tuning"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -93,7 +97,11 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), SimError> {
     match cli.command {
-        Command::Init { state, plant, params } => {
+        Command::Init {
+            state,
+            plant,
+            params,
+        } => {
             let overrides = parse_param_overrides(&params)?;
             let p = build_plant(plant, &overrides)?;
             p.validate_params()?;
@@ -178,7 +186,9 @@ fn build_plant(kind: PlantKind, o: &HashMap<String, f64>) -> Result<Plant, SimEr
                 t_ambient: g("t_ambient").unwrap_or(20.0),
                 k_heat: g("k_heat").unwrap_or(0.01),
             };
-            let t = g("t").or_else(|| g("t_initial")).unwrap_or(params.t_ambient);
+            let t = g("t")
+                .or_else(|| g("t_initial"))
+                .unwrap_or(params.t_ambient);
             params.validate()?;
             Ok(Plant::Thermal { params, t })
         }

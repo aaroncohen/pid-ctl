@@ -297,7 +297,10 @@ mod tests {
         assert_eq!(v["iter"], 7);
         assert_eq!(v["source"], "socket");
         // Must NOT contain gains_changed fields
-        assert!(v.get("kp").is_none(), "kp should not be in integral_reset event");
+        assert!(
+            v.get("kp").is_none(),
+            "kp should not be in integral_reset event"
+        );
     }
 
     #[test]
@@ -327,6 +330,9 @@ mod tests {
         f.read_to_string(&mut s).unwrap();
         let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
         assert_eq!(v["event"], "pv_read_failure");
-        assert!(v.get("safe_cv").is_none(), "safe_cv should be absent when None");
+        assert!(
+            v.get("safe_cv").is_none(),
+            "safe_cv should be absent when None"
+        );
     }
 }

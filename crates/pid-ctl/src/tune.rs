@@ -55,10 +55,18 @@ struct GainAnnotation {
 impl GainAnnotation {
     fn display_text(&self) -> String {
         let mut parts = Vec::new();
-        if let Some((f, t)) = self.kp { parts.push(format!("Kp {f:.3}→{t:.3}")); }
-        if let Some((f, t)) = self.ki { parts.push(format!("Ki {f:.3}→{t:.3}")); }
-        if let Some((f, t)) = self.kd { parts.push(format!("Kd {f:.3}→{t:.3}")); }
-        if let Some((f, t)) = self.sp { parts.push(format!("SP {f:.3}→{t:.3}")); }
+        if let Some((f, t)) = self.kp {
+            parts.push(format!("Kp {f:.3}→{t:.3}"));
+        }
+        if let Some((f, t)) = self.ki {
+            parts.push(format!("Ki {f:.3}→{t:.3}"));
+        }
+        if let Some((f, t)) = self.kd {
+            parts.push(format!("Kd {f:.3}→{t:.3}"));
+        }
+        if let Some((f, t)) = self.sp {
+            parts.push(format!("SP {f:.3}→{t:.3}"));
+        }
         parts.join("  ")
     }
 }
@@ -177,7 +185,8 @@ impl TuneUiState {
         let kp_changed = self.last_kp.is_finite() && (cfg.kp - self.last_kp).abs() > f64::EPSILON;
         let ki_changed = self.last_ki.is_finite() && (cfg.ki - self.last_ki).abs() > f64::EPSILON;
         let kd_changed = self.last_kd.is_finite() && (cfg.kd - self.last_kd).abs() > f64::EPSILON;
-        let sp_changed = self.last_sp.is_finite() && (cfg.setpoint - self.last_sp).abs() > f64::EPSILON;
+        let sp_changed =
+            self.last_sp.is_finite() && (cfg.setpoint - self.last_sp).abs() > f64::EPSILON;
         let prev_kp = self.last_kp;
         let prev_ki = self.last_ki;
         let prev_kd = self.last_kd;
@@ -192,10 +201,21 @@ impl TuneUiState {
         if let Some(ann) = self.annotations.back_mut()
             && self.tick_serial.saturating_sub(ann.marker_tick) <= 3
         {
-            if kp_changed { ann.kp = Some(ann.kp.map_or((prev_kp, cfg.kp), |(from, _)| (from, cfg.kp))); }
-            if ki_changed { ann.ki = Some(ann.ki.map_or((prev_ki, cfg.ki), |(from, _)| (from, cfg.ki))); }
-            if kd_changed { ann.kd = Some(ann.kd.map_or((prev_kd, cfg.kd), |(from, _)| (from, cfg.kd))); }
-            if sp_changed { ann.sp = Some(ann.sp.map_or((prev_sp, cfg.setpoint), |(from, _)| (from, cfg.setpoint))); }
+            if kp_changed {
+                ann.kp = Some(ann.kp.map_or((prev_kp, cfg.kp), |(from, _)| (from, cfg.kp)));
+            }
+            if ki_changed {
+                ann.ki = Some(ann.ki.map_or((prev_ki, cfg.ki), |(from, _)| (from, cfg.ki)));
+            }
+            if kd_changed {
+                ann.kd = Some(ann.kd.map_or((prev_kd, cfg.kd), |(from, _)| (from, cfg.kd)));
+            }
+            if sp_changed {
+                ann.sp = Some(
+                    ann.sp
+                        .map_or((prev_sp, cfg.setpoint), |(from, _)| (from, cfg.setpoint)),
+                );
+            }
             ann.marker_tick = self.tick_serial;
             return;
         }
@@ -296,7 +316,8 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                         had_terminal_event = true;
                         if ui.export_overlay.is_some() {
                             ui.export_overlay = None;
-                        } else if ui.help_overlay && matches!(key.code, KeyCode::Esc | KeyCode::Char('?'))
+                        } else if ui.help_overlay
+                            && matches!(key.code, KeyCode::Esc | KeyCode::Char('?'))
                         {
                             ui.help_overlay = false;
                         } else if ui.command_mode {
@@ -327,8 +348,12 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
             if let Some(ref listener) = socket_listener {
                 for _ in 0..10 {
                     match listener.try_service_one(|req| {
-                        let (resp, effect) =
-                            crate::handle_socket_request(&req, &mut session, &mut args, &mut log_file);
+                        let (resp, effect) = crate::handle_socket_request(
+                            &req,
+                            &mut session,
+                            &mut args,
+                            &mut log_file,
+                        );
                         match effect {
                             crate::SocketSideEffect::Hold => ui.hold = true,
                             crate::SocketSideEffect::Resume => ui.hold = false,
@@ -337,7 +362,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                         }
                         resp
                     }) {
-                        Ok(Some(())) => {},
+                        Ok(Some(())) => {}
                         _ => break,
                     }
                 }
@@ -356,14 +381,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                     || until < TUNE_IDLE_DRAW_DEADLINE_NEAR
                     || now.duration_since(last_idle_draw) >= TUNE_IDLE_DRAW_MIN;
                 if should_idle_draw {
-                    draw(
-                        &mut terminal,
-                        &session,
-                        &args,
-                        &ui,
-                        interval_secs,
-                        until,
-                    )?;
+                    draw(&mut terminal, &session, &args, &ui, interval_secs, until)?;
                     last_idle_draw = now;
                 }
                 continue;
@@ -580,9 +598,7 @@ fn tune_tick(
                 write_safe_cv(args.safe_cv, cv_sink, session);
                 return Err(CliError::new(
                     2,
-                    format!(
-                        "exiting after {cv_fail_count} consecutive CV write failures: {error}"
-                    ),
+                    format!("exiting after {cv_fail_count} consecutive CV write failures: {error}"),
                 ));
             }
             Ok(None)
@@ -693,7 +709,9 @@ fn format_interval_arg(d: Duration) -> String {
 }
 
 fn step_125_up(v: f64) -> f64 {
-    if v <= 0.0 || !v.is_finite() { return 0.1; }
+    if v <= 0.0 || !v.is_finite() {
+        return 0.1;
+    }
     let mag = v.log10().floor();
     let base = 10f64.powf(mag);
     // mantissa is always 1, 2, or 5 for well-formed 1-2-5 steps; cast is safe.
@@ -707,7 +725,9 @@ fn step_125_up(v: f64) -> f64 {
 }
 
 fn step_125_down(v: f64) -> f64 {
-    if v <= 0.0 || !v.is_finite() { return 0.1; }
+    if v <= 0.0 || !v.is_finite() {
+        return 0.1;
+    }
     let mag = v.log10().floor();
     let base = 10f64.powf(mag);
     // mantissa is always 1, 2, or 5 for well-formed 1-2-5 steps; cast is safe.
@@ -768,7 +788,11 @@ fn handle_normal_key(
         }
         KeyCode::Char('d') => {
             ui.dry_run = !ui.dry_run;
-            let msg = if ui.dry_run { "Dry-run on" } else { "Dry-run off" };
+            let msg = if ui.dry_run {
+                "Dry-run on"
+            } else {
+                "Dry-run off"
+            };
             ui.status_flash = Some((msg.into(), Instant::now()));
         }
         KeyCode::Char('?') => ui.help_overlay = !ui.help_overlay,
@@ -1040,7 +1064,9 @@ fn history_range(history: &VecDeque<f64>) -> Option<(f64, f64)> {
             count += 1;
         }
     }
-    if count == 0 { return None; }
+    if count == 0 {
+        return None;
+    }
     #[allow(clippy::cast_precision_loss)]
     let mean = sum / count as f64;
     Some(expand_scale(lo, hi, mean))
@@ -1082,7 +1108,9 @@ fn spark_data(values: &VecDeque<f64>) -> Vec<u64> {
             }
             // Value is clamped to [0.0, 100.0] before rounding, so truncation and sign loss are safe.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            { (((v - lo) / span) * 100.0).clamp(0.0, 100.0).round() as u64 }
+            {
+                (((v - lo) / span) * 100.0).clamp(0.0, 100.0).round() as u64
+            }
         })
         .collect()
 }
@@ -1108,7 +1136,9 @@ fn spark_marker_row(
         .take(w)
         .map(|&s| if s % 10 == 0 { '·' } else { ' ' })
         .collect();
-    while chars.len() < w { chars.push(' '); }
+    while chars.len() < w {
+        chars.push(' ');
+    }
     // Gain-change pipes overwrite dots.
     for ann in annotations {
         if let Some(col) = serial_window.iter().position(|s| *s == ann.marker_tick)
@@ -1158,7 +1188,11 @@ fn cv_bar_block(frac: f64, width: usize) -> String {
     // frac is in [0.0, 1.0]; width is a small terminal column count.
     // Casting width (usize) to f64 is lossless for any realistic terminal width.
     // Casting the rounded product back to usize: result is clamped by .min(width).
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     let filled = ((frac * width as f64).round() as usize).min(width);
     let mut s = String::with_capacity(width + 2);
     s.push('[');
@@ -1217,7 +1251,9 @@ fn fuzzy_command_names(token: &str) -> Vec<&'static str> {
 }
 
 fn needed_decimals(v: f64) -> usize {
-    if !v.is_finite() { return 2; }
+    if !v.is_finite() {
+        return 2;
+    }
     let v = v.abs();
     for d in 0i32..=6 {
         let factor = 10f64.powi(d);
@@ -1230,12 +1266,21 @@ fn needed_decimals(v: f64) -> usize {
 }
 
 fn gains_precision(cfg: &PidConfig, step: &[f64; 4]) -> usize {
-    [cfg.kp, cfg.ki, cfg.kd, cfg.setpoint, step[0], step[1], step[2], step[3]]
-        .iter()
-        .map(|&v| needed_decimals(v))
-        .max()
-        .unwrap_or(2)
-        .max(1)
+    [
+        cfg.kp,
+        cfg.ki,
+        cfg.kd,
+        cfg.setpoint,
+        step[0],
+        step[1],
+        step[2],
+        step[3],
+    ]
+    .iter()
+    .map(|&v| needed_decimals(v))
+    .max()
+    .unwrap_or(2)
+    .max(1)
 }
 
 fn step_cell_for_row(focus: GainFocus, row: usize, step: &[f64; 4], prec: usize) -> String {
@@ -1339,8 +1384,12 @@ fn render_frame(
 ) {
     // Export overlay — full-screen, highest priority (any key dismisses).
     if let Some(export_text) = &ui.export_overlay {
-        let block = Block::default().borders(Borders::ALL).title("Export (any key to dismiss)");
-        let p = Paragraph::new(export_text.as_str()).wrap(Wrap { trim: false }).block(block);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Export (any key to dismiss)");
+        let p = Paragraph::new(export_text.as_str())
+            .wrap(Wrap { trim: false })
+            .block(block);
         f.render_widget(p, f.area());
         return;
     }
@@ -1445,16 +1494,32 @@ fn render_frame(
          {}Ki  {}  {}  integral — drift correction\n\
          {}Kd  {}  {}  derivative — damping / braking\n\
          {}SP  {}  {}  setpoint target",
-        if ui.focus == GainFocus::Kp { "▶ " } else { "  " },
+        if ui.focus == GainFocus::Kp {
+            "▶ "
+        } else {
+            "  "
+        },
         fmtg(cfg.kp),
         step_cell_for_row(ui.focus, 0, &ui.step, gprec),
-        if ui.focus == GainFocus::Ki { "▶ " } else { "  " },
+        if ui.focus == GainFocus::Ki {
+            "▶ "
+        } else {
+            "  "
+        },
         fmtg(cfg.ki),
         step_cell_for_row(ui.focus, 1, &ui.step, gprec),
-        if ui.focus == GainFocus::Kd { "▶ " } else { "  " },
+        if ui.focus == GainFocus::Kd {
+            "▶ "
+        } else {
+            "  "
+        },
         fmtg(cfg.kd),
         step_cell_for_row(ui.focus, 2, &ui.step, gprec),
-        if ui.focus == GainFocus::Sp { "▶ " } else { "  " },
+        if ui.focus == GainFocus::Sp {
+            "▶ "
+        } else {
+            "  "
+        },
         fmtg(cfg.setpoint),
         step_cell_for_row(ui.focus, 3, &ui.step, gprec),
     );
@@ -1531,7 +1596,9 @@ fn render_frame(
 
     let pv_scale = history_range(&ui.pv_history);
     let pv_trend = history_trend(&ui.pv_history);
-    let pv_range_str = pv_scale.map(|(lo, hi)| format!("  [{lo:.2} – {hi:.2}]")).unwrap_or_default();
+    let pv_range_str = pv_scale
+        .map(|(lo, hi)| format!("  [{lo:.2} – {hi:.2}]"))
+        .unwrap_or_default();
     let pv_title = format!("PV {pv_trend} {pv_val:.2}{pv_range_str}");
     let spark_pv = Sparkline::default()
         .data(&pv_spark)
@@ -1557,7 +1624,12 @@ fn render_frame(
             if ind_x + 2 <= hist_inner[1].right() {
                 f.render_widget(
                     Paragraph::new("──").style(Style::default().fg(Color::White)),
-                    Rect { x: ind_x, y: sp_y, width: 2, height: 1 },
+                    Rect {
+                        x: ind_x,
+                        y: sp_y,
+                        width: 2,
+                        height: 1,
+                    },
                 );
             }
         }
@@ -1569,7 +1641,9 @@ fn render_frame(
     );
 
     let cv_trend = history_trend(&ui.cv_history);
-    let cv_range_str = history_range(&ui.cv_history).map(|(lo, hi)| format!("  [{lo:.2} – {hi:.2}]")).unwrap_or_default();
+    let cv_range_str = history_range(&ui.cv_history)
+        .map(|(lo, hi)| format!("  [{lo:.2} – {hi:.2}]"))
+        .unwrap_or_default();
     let cv_title = format!("CV {cv_trend} {cv_val:.2}{cv_range_str}");
     let cv_sparkline = Sparkline::default()
         .data(&cv_spark)
@@ -1592,7 +1666,11 @@ fn render_frame(
 
     let keymap = "↑↓ select  ←→ adjust  [] step  / cmd  r reset  s save  c export  h hold  d dry-run  ? help  q quit";
     let flash_msg = ui.status_flash.as_ref().and_then(|(msg, t)| {
-        if t.elapsed() < Duration::from_secs(3) { Some(msg.as_str()) } else { None }
+        if t.elapsed() < Duration::from_secs(3) {
+            Some(msg.as_str())
+        } else {
+            None
+        }
     });
     let footer_text = if let Some(msg) = flash_msg {
         format!("{msg}  |  {keymap}")
@@ -1664,8 +1742,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::{
-        GainAnnotation, build_export_line_values, history_trend, spark_data,
-        spark_marker_row,
+        GainAnnotation, build_export_line_values, history_trend, spark_data, spark_marker_row,
     };
     use std::collections::VecDeque;
     use std::time::Duration;
@@ -1755,7 +1832,10 @@ mod tests {
         let spark_w = 100usize;
         // The cap logic: cap = tune_history.max(spark_w)
         let cap = tune_history.max(spark_w);
-        assert_eq!(cap, 100, "cap should follow spark_w when spark_w > tune_history");
+        assert_eq!(
+            cap, 100,
+            "cap should follow spark_w when spark_w > tune_history"
+        );
         // Simulate the dequeue trimming
         let mut history: VecDeque<f64> = VecDeque::new();
         for i in 0..200usize {
@@ -1767,7 +1847,10 @@ mod tests {
         assert_eq!(history.len(), cap, "history should hold exactly cap items");
         // Conversely: if spark_w < tune_history, tune_history wins
         let cap2 = tune_history.max(20);
-        assert_eq!(cap2, 20, "cap should follow tune_history when tune_history > spark_w");
+        assert_eq!(
+            cap2, 20,
+            "cap should follow tune_history when tune_history > spark_w"
+        );
     }
 
     #[test]
@@ -1824,7 +1907,13 @@ mod tests {
     fn spark_marker_row_pipe_overwrites_dot() {
         let serials: Vec<u64> = vec![10, 20, 30];
         let mut ann: VecDeque<GainAnnotation> = VecDeque::new();
-        ann.push_back(GainAnnotation { marker_tick: 10, kp: Some((1.0, 2.0)), ki: None, kd: None, sp: None });
+        ann.push_back(GainAnnotation {
+            marker_tick: 10,
+            kp: Some((1.0, 2.0)),
+            ki: None,
+            kd: None,
+            sp: None,
+        });
         let row = spark_marker_row(&serials, &ann, 3);
         let chars: Vec<char> = row.chars().collect();
         assert_eq!(chars[0], '|', "pipe should overwrite dot at tick 10");
@@ -1876,7 +1965,10 @@ mod tests {
     fn expand_scale_widens_tiny_range() {
         use super::expand_scale;
         let (lo, hi) = expand_scale(2.770, 2.780, 2.775);
-        assert!(hi - lo >= 0.01 * 2.775, "span should be at least 1% of mean");
+        assert!(
+            hi - lo >= 0.01 * 2.775,
+            "span should be at least 1% of mean"
+        );
         assert!(lo <= 2.770, "lo should not exceed original min");
         assert!(hi >= 2.780, "hi should not exceed original max");
     }
@@ -1894,7 +1986,9 @@ mod tests {
         use super::history_range;
         let mut d = VecDeque::new();
         // Tight range around 100 — should be expanded to at least 1%
-        for _ in 0..10 { d.push_back(100.0); }
+        for _ in 0..10 {
+            d.push_back(100.0);
+        }
         d.push_back(100.001);
         let (lo, hi) = history_range(&d).unwrap();
         assert!(hi - lo >= 0.01 * 100.0 * 0.99, "span should be ~1% of mean");

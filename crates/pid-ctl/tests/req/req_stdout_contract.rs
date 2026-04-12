@@ -51,7 +51,7 @@ fn loop_cv_stdout_rejects_format_json() {
         "1s",
     ]);
 
-    cmd.assert().code(3).stderr(contains(
-        "--format json and --cv-stdout are incompatible",
-    ));
+    cmd.assert()
+        .code(3)
+        .stderr(contains("--format json and --cv-stdout are incompatible"));
 }

@@ -43,18 +43,13 @@ fn loop_pid_ctl_sim_smoke_no_crash() {
         .success();
 
     let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl");
-    cmd.args([
-        "loop",
-        "--pv-cmd",
-    ]);
+    cmd.args(["loop", "--pv-cmd"]);
     cmd.arg(format!(
         "{} print-pv --state {}",
         sim_bin.display(),
         plant.display()
     ));
-    cmd.args([
-        "--cv-cmd",
-    ]);
+    cmd.args(["--cv-cmd"]);
     cmd.arg(format!(
         "{} apply-cv --state {} --dt 0.2 --cv {{cv}}",
         sim_bin.display(),

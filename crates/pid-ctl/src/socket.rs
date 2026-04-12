@@ -277,7 +277,9 @@ pub fn client_request(path: &Path, req: &Request) -> Result<Response, SocketErro
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
 
     let payload = serde_json::to_string(req).map_err(|e| SocketError::Protocol(e.to_string()))?;
-    stream.write_all(payload.as_bytes()).map_err(SocketError::Io)?;
+    stream
+        .write_all(payload.as_bytes())
+        .map_err(SocketError::Io)?;
     stream.shutdown(Shutdown::Write)?;
 
     let mut response_buf = String::new();
@@ -371,7 +373,10 @@ mod tests {
         let json = serde_json::to_string(&reset).unwrap();
         assert!(json.contains(r#""i_acc_before":5.5"#));
 
-        let ack = Response::Ack { ok: true, error: None };
+        let ack = Response::Ack {
+            ok: true,
+            error: None,
+        };
         let json = serde_json::to_string(&ack).unwrap();
         assert_eq!(json, r#"{"ok":true}"#);
 
@@ -433,8 +438,12 @@ mod tests {
 
         // Connect as a client.
         let mut client = UnixStream::connect(&path).unwrap();
-        client.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
 
         let req = serde_json::to_string(&Request::Status).unwrap();
         client.write_all(req.as_bytes()).unwrap();
@@ -443,7 +452,10 @@ mod tests {
         // Service the connection.
         let result = listener.try_service_one(|r| {
             assert_eq!(r, Request::Status);
-            Response::Ack { ok: true, error: None }
+            Response::Ack {
+                ok: true,
+                error: None,
+            }
         });
         assert!(result.unwrap().is_some());
 
@@ -451,7 +463,13 @@ mod tests {
         let mut resp_buf = String::new();
         client.read_to_string(&mut resp_buf).unwrap();
         let resp: Response = serde_json::from_str(resp_buf.trim()).unwrap();
-        assert_eq!(resp, Response::Ack { ok: true, error: None });
+        assert_eq!(
+            resp,
+            Response::Ack {
+                ok: true,
+                error: None
+            }
+        );
     }
 
     #[test]
@@ -476,14 +494,23 @@ mod tests {
             reader.read_to_string(&mut buf).unwrap();
             let _req: Request = serde_json::from_str(&buf).unwrap();
 
-            let resp = Response::Ack { ok: true, error: None };
+            let resp = Response::Ack {
+                ok: true,
+                error: None,
+            };
             let mut json = serde_json::to_string(&resp).unwrap();
             json.push('\n');
             (&stream).write_all(json.as_bytes()).unwrap();
         });
 
         let resp = client_request(&path_clone, &Request::Status).unwrap();
-        assert_eq!(resp, Response::Ack { ok: true, error: None });
+        assert_eq!(
+            resp,
+            Response::Ack {
+                ok: true,
+                error: None
+            }
+        );
 
         server.join().unwrap();
     }
@@ -509,8 +536,12 @@ mod tests {
         let listener = SocketListener::bind(&path, 0o600).unwrap();
 
         let mut client = UnixStream::connect(&path).unwrap();
-        client.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
 
         // Write more than 4096 bytes.
         let oversized = "x".repeat(5000);

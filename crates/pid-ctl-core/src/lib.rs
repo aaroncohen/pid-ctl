@@ -6,7 +6,6 @@
 
 #![forbid(unsafe_code)]
 
-
 use std::error::Error;
 use std::fmt;
 
@@ -422,7 +421,6 @@ impl fmt::Display for ConfigError {
 }
 
 impl Error for ConfigError {}
-
 
 fn ramp_toward(current: f64, target: f64, max_delta: f64) -> f64 {
     if (target - current).abs() <= max_delta {

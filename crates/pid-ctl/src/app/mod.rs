@@ -506,9 +506,9 @@ fn finite_value(value: f64) -> Option<f64> {
 
 #[must_use]
 pub fn now_iso8601() -> String {
+    use time::OffsetDateTime;
     use time::format_description::FormatItem;
     use time::macros::format_description;
-    use time::OffsetDateTime;
     // Produce YYYY-MM-DDTHH:MM:SSZ (no sub-seconds, Z suffix).
     const FMT: &[FormatItem<'_>] =
         format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");

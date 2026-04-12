@@ -61,7 +61,16 @@ fn spawn_loop(
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_pid-ctl"));
     cmd.args(["loop", "--pv-file"])
         .arg(pv_path)
-        .args(["--setpoint", "60", "--kp", "1.0", "--ki", "0.1", "--kd", "0.0"])
+        .args([
+            "--setpoint",
+            "60",
+            "--kp",
+            "1.0",
+            "--ki",
+            "0.1",
+            "--kd",
+            "0.0",
+        ])
         .args(["--out-min", "0", "--out-max", "100"])
         .arg("--cv-file")
         .arg(cv_path)
@@ -195,7 +204,9 @@ fn test_socket_reset() {
     let v: serde_json::Value = serde_json::from_str(raw.trim()).expect("parse reset response");
 
     assert_eq!(v["ok"], true);
-    let i_acc_before = v["i_acc_before"].as_f64().expect("i_acc_before should be a number");
+    let i_acc_before = v["i_acc_before"]
+        .as_f64()
+        .expect("i_acc_before should be a number");
     assert!(
         i_acc_before.abs() > 0.001,
         "expected nonzero i_acc_before after several ticks, got {i_acc_before}"
@@ -448,7 +459,16 @@ fn test_socket_already_running() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_pid-ctl"))
         .args(["loop", "--pv-file"])
         .arg(&pv_path)
-        .args(["--setpoint", "60", "--kp", "1.0", "--ki", "0.1", "--kd", "0.0"])
+        .args([
+            "--setpoint",
+            "60",
+            "--kp",
+            "1.0",
+            "--ki",
+            "0.1",
+            "--kd",
+            "0.0",
+        ])
         .args(["--out-min", "0", "--out-max", "100"])
         .arg("--cv-file")
         .arg(&cv_path)
@@ -513,10 +533,7 @@ fn test_socket_mode_permissions() {
 
     let meta = std::fs::symlink_metadata(&socket_path).expect("socket metadata");
     let mode = meta.permissions().mode() & 0o777;
-    assert_eq!(
-        mode, 0o660,
-        "socket mode should be 0660, got {mode:#o}"
-    );
+    assert_eq!(mode, 0o660, "socket mode should be 0660, got {mode:#o}");
 }
 
 #[test]
@@ -536,7 +553,10 @@ fn test_socket_save_without_state_returns_error() {
     let raw = socket_request(&socket_path, r#"{"cmd":"save"}"#);
     let v: serde_json::Value = serde_json::from_str(raw.trim()).expect("parse save response");
 
-    assert_eq!(v["ok"], false, "save without --state should return ok:false, got: {v}");
+    assert_eq!(
+        v["ok"], false,
+        "save without --state should return ok:false, got: {v}"
+    );
     assert!(
         v["error"].as_str().is_some(),
         "save without --state should include an error message, got: {v}"
@@ -560,7 +580,10 @@ fn test_socket_save_with_state_returns_ok() {
     let raw = socket_request(&socket_path, r#"{"cmd":"save"}"#);
     let v: serde_json::Value = serde_json::from_str(raw.trim()).expect("parse save response");
 
-    assert_eq!(v["ok"], true, "save with --state should return ok:true, got: {v}");
+    assert_eq!(
+        v["ok"], true,
+        "save with --state should return ok:true, got: {v}"
+    );
     assert!(state_path.exists(), "state file should exist after save");
 }
 
@@ -584,7 +607,9 @@ fn test_socket_ready_event_emitted_on_stderr() {
     // Read all stderr output.
     use std::io::Read as _;
     let mut stderr = String::new();
-    std::io::BufReader::new(stderr_pipe).read_to_string(&mut stderr).ok();
+    std::io::BufReader::new(stderr_pipe)
+        .read_to_string(&mut stderr)
+        .ok();
 
     // Find the socket_ready NDJSON line.
     let ready_line = stderr
@@ -692,12 +717,18 @@ fn test_cli_reset() {
     assert!(status.success(), "pid-ctl reset failed: {out}");
     let v: serde_json::Value = serde_json::from_str(out.trim()).expect("parse reset output");
     assert_eq!(v["ok"], true);
-    assert!(v["i_acc_before"].is_number(), "reset should return i_acc_before");
+    assert!(
+        v["i_acc_before"].is_number(),
+        "reset should return i_acc_before"
+    );
 
     // Status immediately after reset should show i_acc == 0.
     let raw = socket_request(&socket_path, r#"{"cmd":"status"}"#);
     let sv: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
-    assert_eq!(sv["i_acc"], 0.0, "i_acc should be 0 immediately after reset");
+    assert_eq!(
+        sv["i_acc"], 0.0,
+        "i_acc should be 0 immediately after reset"
+    );
 }
 
 #[test]
@@ -714,7 +745,10 @@ fn test_cli_save_no_state() {
 
     let (out, status) = run_ctl_cmd(&["save", "--socket", socket_path.to_str().unwrap()]);
     // Exit code is non-zero because save returned ok:false.
-    assert!(!status.success(), "pid-ctl save without --state should exit non-zero, got: {out}");
+    assert!(
+        !status.success(),
+        "pid-ctl save without --state should exit non-zero, got: {out}"
+    );
     let v: serde_json::Value = serde_json::from_str(out.trim()).expect("parse save output");
     assert_eq!(v["ok"], false);
 }

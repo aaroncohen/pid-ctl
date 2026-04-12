@@ -1,5 +1,5 @@
-use crate::plant::{FanParams, FirstOrderParams, ThermalParams};
 use crate::SimError;
+use crate::plant::{FanParams, FirstOrderParams, ThermalParams};
 use serde::{Deserialize, Serialize};
 
 /// Bump when the JSON shape changes incompatibly.
@@ -114,7 +114,10 @@ mod tests {
             SimState {
                 schema_version: SCHEMA_VERSION,
                 plant: Plant::FirstOrder {
-                    params: FirstOrderParams { tau: 2.0, gain: 3.0 },
+                    params: FirstOrderParams {
+                        tau: 2.0,
+                        gain: 3.0,
+                    },
                     x: 1.5,
                 },
             },
@@ -156,13 +159,22 @@ mod tests {
         let bad = SimState {
             schema_version: SCHEMA_VERSION,
             plant: Plant::FirstOrder {
-                params: FirstOrderParams { tau: -1.0, gain: 1.0 },
+                params: FirstOrderParams {
+                    tau: -1.0,
+                    gain: 1.0,
+                },
                 x: 0.0,
             },
         };
         let err = bad.validate().expect_err("should fail for tau <= 0");
-        assert!(matches!(err, SimError::Validation(_)), "expected SimError::Validation, got {err:?}");
-        assert!(err.to_string().contains("tau"), "error message should mention 'tau': {err}");
+        assert!(
+            matches!(err, SimError::Validation(_)),
+            "expected SimError::Validation, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("tau"),
+            "error message should mention 'tau': {err}"
+        );
     }
 
     #[test]
@@ -171,25 +183,42 @@ mod tests {
         let bad = SimState {
             schema_version: 999,
             plant: Plant::FirstOrder {
-                params: FirstOrderParams { tau: 1.0, gain: 1.0 },
+                params: FirstOrderParams {
+                    tau: 1.0,
+                    gain: 1.0,
+                },
                 x: 0.0,
             },
         };
-        let err = bad.validate().expect_err("should fail for wrong schema version");
+        let err = bad
+            .validate()
+            .expect_err("should fail for wrong schema version");
         assert!(matches!(err, SimError::Validation(_)));
-        assert!(err.to_string().contains("schema_version"), "error should mention schema_version: {err}");
+        assert!(
+            err.to_string().contains("schema_version"),
+            "error should mention schema_version: {err}"
+        );
     }
 
     #[test]
     fn apply_cv_returns_sim_error_for_bad_dt() {
         use crate::SimError;
         let mut plant = Plant::Thermal {
-            params: ThermalParams { tau: 10.0, t_ambient: 20.0, k_heat: 0.01 },
+            params: ThermalParams {
+                tau: 10.0,
+                t_ambient: 20.0,
+                k_heat: 0.01,
+            },
             t: 20.0,
         };
-        let err = plant.apply_cv(1.0, -0.1).expect_err("negative dt should fail");
+        let err = plant
+            .apply_cv(1.0, -0.1)
+            .expect_err("negative dt should fail");
         assert!(matches!(err, SimError::Validation(_)));
-        assert!(err.to_string().contains("dt"), "error should mention dt: {err}");
+        assert!(
+            err.to_string().contains("dt"),
+            "error should mention dt: {err}"
+        );
     }
 
     #[test]

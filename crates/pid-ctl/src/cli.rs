@@ -233,7 +233,11 @@ impl From<OutputFormatArg> for OutputFormat {
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "pid-ctl", about = "PID loop controller", disable_help_subcommand = true)]
+#[command(
+    name = "pid-ctl",
+    about = "PID loop controller",
+    disable_help_subcommand = true
+)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: SubCommand,
@@ -479,9 +483,15 @@ impl CvSinkRawArgs {
     /// Returns the CV sink config if any CV sink flag was set, and an error if multiple were set.
     fn to_cv_sink_config(&self) -> Result<Option<CvSinkConfig>, CliError> {
         let mut count = 0u32;
-        if self.cv_stdout { count += 1; }
-        if self.cv_file.is_some() { count += 1; }
-        if self.cv_cmd.is_some() { count += 1; }
+        if self.cv_stdout {
+            count += 1;
+        }
+        if self.cv_file.is_some() {
+            count += 1;
+        }
+        if self.cv_cmd.is_some() {
+            count += 1;
+        }
 
         if count > 1 {
             return Err(CliError::config("only one CV sink may be specified"));
@@ -536,9 +546,15 @@ impl OncePvRawArgs {
         }
 
         let mut count = 0u32;
-        if !self.pv.is_empty() { count += 1; }
-        if self.pv_file.is_some() { count += 1; }
-        if self.pv_cmd.is_some() { count += 1; }
+        if !self.pv.is_empty() {
+            count += 1;
+        }
+        if self.pv_file.is_some() {
+            count += 1;
+        }
+        if self.pv_cmd.is_some() {
+            count += 1;
+        }
 
         // Multiple --pv values or multiple source types both mean "only one PV source".
         if self.pv.len() > 1 || count > 1 {
@@ -550,7 +566,8 @@ impl OncePvRawArgs {
         } else if let Some(ref path) = self.pv_file {
             Ok(Some(PvSourceConfig::File(path.clone())))
         } else {
-            Ok(self.pv_cmd
+            Ok(self
+                .pv_cmd
                 .as_ref()
                 .map(|cmd| PvSourceConfig::Cmd(cmd.clone())))
         }
@@ -594,9 +611,15 @@ impl LoopPvRawArgs {
         }
 
         let mut count = 0u32;
-        if self.pv_file.is_some() { count += 1; }
-        if self.pv_cmd.is_some() { count += 1; }
-        if self.pv_stdin { count += 1; }
+        if self.pv_file.is_some() {
+            count += 1;
+        }
+        if self.pv_cmd.is_some() {
+            count += 1;
+        }
+        if self.pv_stdin {
+            count += 1;
+        }
 
         if count > 1 {
             return Err(CliError::config("only one PV source may be specified"));
@@ -904,8 +927,7 @@ pub(crate) fn parse_once(raw: &OnceRawArgs) -> Result<OnceArgs, CliError> {
 
     let output_format: OutputFormat = raw.common.format.clone().into();
 
-    if matches!(output_format, OutputFormat::Json)
-        && matches!(cv_sink, Some(CvSinkConfig::Stdout))
+    if matches!(output_format, OutputFormat::Json) && matches!(cv_sink, Some(CvSinkConfig::Stdout))
     {
         return Err(CliError::config(
             "--format json writes to stdout, which conflicts with --cv-stdout — use --log for machine-readable telemetry",
@@ -1071,18 +1093,14 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
     }
 
     // --format json and --cv-stdout conflict: both write to stdout.
-    if matches!(output_format, OutputFormat::Json)
-        && matches!(cv_sink, Some(CvSinkConfig::Stdout))
+    if matches!(output_format, OutputFormat::Json) && matches!(cv_sink, Some(CvSinkConfig::Stdout))
     {
         return Err(CliError::config(
             "--format json and --cv-stdout are incompatible — JSON iteration records and raw CV values would corrupt stdout; use --log for machine-readable telemetry",
         ));
     }
 
-    let cv_cmd_timeout = raw
-        .common
-        .cv_cmd_timeout
-        .map(Duration::from_secs_f64);
+    let cv_cmd_timeout = raw.common.cv_cmd_timeout.map(Duration::from_secs_f64);
     if let Some(ref mut sink) = cv_sink {
         apply_cv_cmd_timeout(sink, cv_cmd_timeout);
         apply_verify_cv(sink, raw.cv.verify_cv);
@@ -1110,10 +1128,10 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
     let explicit_pv_stdin_timeout = raw.pv.pv_stdin_timeout.is_some();
 
     // Default cmd-timeout: min(interval, 30s).
-    let effective_cmd_timeout = raw
-        .common
-        .cmd_timeout
-        .map_or_else(|| interval.min(Duration::from_secs(30)), Duration::from_secs_f64);
+    let effective_cmd_timeout = raw.common.cmd_timeout.map_or_else(
+        || interval.min(Duration::from_secs(30)),
+        Duration::from_secs_f64,
+    );
     let pv_cmd_timeout = raw
         .common
         .pv_cmd_timeout
@@ -1342,4 +1360,3 @@ pub(crate) fn parse_f64_value(flag: &str, value: &str) -> Result<f64, CliError> 
         CliError::config(format!("{flag} expects a float, got `{value}`: {error}"))
     })
 }
-
