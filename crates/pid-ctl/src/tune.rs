@@ -1034,7 +1034,7 @@ fn draw(
 ) -> Result<(), CliError> {
     terminal
         .draw(|f| {
-            render_frame(f, session, args, ui, interval_secs, until_next);
+            render_frame(f, session.config(), args, ui, interval_secs, until_next);
         })
         .map_err(|e| CliError::new(1, format!("draw: {e}")))?;
     Ok(())
@@ -1388,7 +1388,7 @@ Export / copy-paste: c or export prints a full non-interactive CLI (and a short 
 #[allow(clippy::too_many_lines)]
 fn render_frame(
     f: &mut Frame<'_>,
-    session: &ControllerSession,
+    cfg: &PidConfig,
     args: &LoopArgs,
     ui: &TuneUiState,
     interval_secs: f64,
@@ -1418,7 +1418,6 @@ fn render_frame(
         return;
     }
 
-    let cfg = session.config();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1732,12 +1731,7 @@ fn render_frame(
     if ui.command_mode {
         use ratatui::style::Modifier;
         use ratatui::widgets::Clear;
-        let hint = command_mode_hint(
-            &ui.command_buf,
-            session.config(),
-            args.interval,
-            args.units.as_deref(),
-        );
+        let hint = command_mode_hint(&ui.command_buf, cfg, args.interval, args.units.as_deref());
         let area = centered_rect(88, 18, f.area());
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1788,7 +1782,7 @@ mod tests {
         spark_marker_row,
     };
     use std::collections::VecDeque;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn spark_data_flat_series_is_visible_mid_line() {
@@ -2150,5 +2144,216 @@ mod tests {
         assert_eq!(s.matches("--setpoint").count(), 1);
         assert!(!s.contains("--tune"));
         assert!(!s.contains("--tune-history"));
+    }
+
+    // ── Render visibility helpers ──────────────────────────────────────────────
+
+    fn test_pid_config() -> pid_ctl_core::PidConfig {
+        pid_ctl_core::PidConfig {
+            setpoint: 55.0,
+            kp: 1.0,
+            ki: 0.05,
+            kd: 0.01,
+            out_min: 0.0,
+            out_max: 100.0,
+            ..Default::default()
+        }
+    }
+
+    fn test_loop_args(config: pid_ctl_core::PidConfig) -> super::LoopArgs {
+        super::LoopArgs {
+            interval: Duration::from_secs(1),
+            pv_source: crate::PvSourceConfig::Literal(0.0),
+            cv_sink: None,
+            pid_config: config,
+            state_path: None,
+            name: None,
+            reset_accumulator: false,
+            scale: 1.0,
+            cv_precision: 3,
+            output_format: crate::OutputFormat::Text,
+            cmd_timeout: Duration::from_secs(5),
+            pv_cmd_timeout: Duration::from_secs(5),
+            safe_cv: None,
+            cv_fail_after: 3,
+            fail_after: None,
+            min_dt: 0.5,
+            max_dt: 2.0,
+            dt_clamp: false,
+            log_path: None,
+            dry_run: true,
+            pv_stdin_timeout: Duration::from_secs(5),
+            verify_cv: false,
+            state_write_interval: None,
+            state_fail_after: 3,
+            tune: true,
+            tune_history: 60,
+            tune_step_kp: 0.01,
+            tune_step_ki: 0.001,
+            tune_step_kd: 0.01,
+            tune_step_sp: 0.1,
+            units: Some("°C".into()),
+            quiet: false,
+            verbose: false,
+            explicit_max_dt: false,
+            explicit_min_dt: false,
+            explicit_pv_stdin_timeout: false,
+            explicit_state_write_interval: false,
+            #[cfg(unix)]
+            socket_path: None,
+            #[cfg(unix)]
+            socket_mode: 0o660,
+        }
+    }
+
+    fn make_test_ui_state(_args: &super::LoopArgs, terminal_width: u16) -> super::TuneUiState {
+        let mut pv_history = VecDeque::new();
+        let mut cv_history = VecDeque::new();
+        let mut serial_history = VecDeque::new();
+        #[allow(clippy::cast_precision_loss)]
+        for i in 0..60u64 {
+            let t = i as f64 * 0.3;
+            pv_history.push_back(53.0 + t.sin() * 3.0);
+            cv_history.push_back(35.0 + i as f64 * 0.3);
+            serial_history.push_back(i + 1);
+        }
+        super::TuneUiState {
+            focus: super::GainFocus::Kp,
+            step: [0.01, 0.001, 0.01, 0.1],
+            command_mode: false,
+            command_buf: String::new(),
+            help_overlay: false,
+            hold: false,
+            dry_run: true,
+            last_record: Some(crate::app::IterationRecord {
+                schema_version: 1,
+                ts: "2026-01-01T00:00:00Z".into(),
+                name: None,
+                iter: 42,
+                pv: 53.2,
+                sp: 55.0,
+                effective_sp: None,
+                err: 1.8,
+                p: 1.8,
+                i: 0.3,
+                d: -0.1,
+                cv: 42.5,
+                i_acc: 1.5,
+                dt: 1.0,
+            }),
+            pv_history,
+            cv_history,
+            serial_history,
+            tick_serial: 60,
+            annotations: VecDeque::new(),
+            spark_w: terminal_width.saturating_sub(4) as usize,
+            last_kp: 1.0,
+            last_ki: 0.05,
+            last_kd: 0.01,
+            last_sp: 55.0,
+            start: Instant::now(),
+            quit: false,
+            status_flash: None,
+            export_overlay: None,
+        }
+    }
+
+    fn buffer_text(backend: &ratatui::backend::TestBackend) -> String {
+        let buf = backend.buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position { x, y })
+                            .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn render_at_size(width: u16, height: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let config = test_pid_config();
+        let args = test_loop_args(config.clone());
+        let ui = make_test_ui_state(&args, width);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                super::render_frame(f, &config, &args, &ui, 1.0, Duration::ZERO);
+            })
+            .unwrap();
+        buffer_text(terminal.backend())
+    }
+
+    // ── Visibility tests ───────────────────────────────────────────────────────
+
+    /// Gains section must be visible even at the minimum practical terminal height.
+    /// Header (2) + Gains (6) + Footer (3) = 11 rows minimum; test at 14 to give
+    /// one row of process info.
+    #[test]
+    fn gains_always_visible_at_minimum_height() {
+        let text = render_at_size(80, 14);
+        assert!(text.contains("GAINS"), "GAINS missing at 80×14:\n{text}");
+        assert!(text.contains("Kp"), "Kp row missing at 80×14:\n{text}");
+        assert!(text.contains("Ki"), "Ki row missing at 80×14:\n{text}");
+        assert!(text.contains("Kd"), "Kd row missing at 80×14:\n{text}");
+    }
+
+    /// At a standard 24-row terminal the process info block should also be present.
+    #[test]
+    fn process_info_visible_at_standard_height() {
+        let text = render_at_size(80, 24);
+        assert!(text.contains("GAINS"), "GAINS missing at 80×24:\n{text}");
+        assert!(
+            text.contains("PROCESS"),
+            "PROCESS block missing at 80×24:\n{text}"
+        );
+        assert!(
+            text.contains("Setpoint"),
+            "Setpoint row missing at 80×24:\n{text}"
+        );
+        assert!(
+            text.contains("PV (actual)"),
+            "PV row missing at 80×24:\n{text}"
+        );
+    }
+
+    /// At 16 rows sparklines should collapse (not enough room) but gains must remain.
+    /// Available body rows = 16 − header(2) − footer(3) = 11, which is below the
+    /// minimum of 13 needed for sparklines, so they collapse to zero height.
+    #[test]
+    fn sparklines_collapse_at_small_height() {
+        let text = render_at_size(80, 16);
+        assert!(text.contains("GAINS"), "GAINS missing at 80×16:\n{text}");
+        assert!(
+            !text.contains("HISTORY"),
+            "HISTORY unexpectedly present at 80×16:\n{text}"
+        );
+    }
+
+    /// At 30 rows the sparklines section should be visible alongside gains and process info.
+    #[test]
+    fn sparklines_visible_at_comfortable_height() {
+        let text = render_at_size(80, 30);
+        assert!(text.contains("GAINS"), "GAINS missing at 80×30:\n{text}");
+        assert!(
+            text.contains("HISTORY"),
+            "HISTORY missing at 80×30:\n{text}"
+        );
+    }
+
+    /// A wide terminal should render all sections without panicking or truncating gains.
+    #[test]
+    fn wide_terminal_renders_without_panic() {
+        let text = render_at_size(200, 30);
+        assert!(text.contains("GAINS"), "GAINS missing at 200×30:\n{text}");
+        assert!(
+            text.contains("HISTORY"),
+            "HISTORY missing at 200×30:\n{text}"
+        );
     }
 }
