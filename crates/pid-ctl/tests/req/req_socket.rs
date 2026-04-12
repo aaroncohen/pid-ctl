@@ -605,7 +605,6 @@ fn test_socket_ready_event_emitted_on_stderr() {
     guard.0.wait().ok();
 
     // Read all stderr output.
-    use std::io::Read as _;
     let mut stderr = String::new();
     std::io::BufReader::new(stderr_pipe)
         .read_to_string(&mut stderr)
@@ -713,6 +712,10 @@ fn test_cli_reset() {
     wait_for_socket(&socket_path, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
+    // Hold first so the loop can't tick between reset and the status check.
+    let (out, status) = run_ctl_cmd(&["hold", "--socket", socket_path.to_str().unwrap()]);
+    assert!(status.success(), "pid-ctl hold failed: {out}");
+
     let (out, status) = run_ctl_cmd(&["reset", "--socket", socket_path.to_str().unwrap()]);
     assert!(status.success(), "pid-ctl reset failed: {out}");
     let v: serde_json::Value = serde_json::from_str(out.trim()).expect("parse reset output");
@@ -722,7 +725,7 @@ fn test_cli_reset() {
         "reset should return i_acc_before"
     );
 
-    // Status immediately after reset should show i_acc == 0.
+    // Status immediately after reset (while held) must show i_acc == 0.
     let raw = socket_request(&socket_path, r#"{"cmd":"status"}"#);
     let sv: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
     assert_eq!(

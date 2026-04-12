@@ -182,50 +182,45 @@ impl TuneUiState {
     }
 
     fn note_gain_change(&mut self, _args: &LoopArgs, cfg: &PidConfig) {
-        let kp_changed = self.last_kp.is_finite() && (cfg.kp - self.last_kp).abs() > f64::EPSILON;
-        let ki_changed = self.last_ki.is_finite() && (cfg.ki - self.last_ki).abs() > f64::EPSILON;
-        let kd_changed = self.last_kd.is_finite() && (cfg.kd - self.last_kd).abs() > f64::EPSILON;
-        let sp_changed =
-            self.last_sp.is_finite() && (cfg.setpoint - self.last_sp).abs() > f64::EPSILON;
-        let prev_kp = self.last_kp;
-        let prev_ki = self.last_ki;
-        let prev_kd = self.last_kd;
-        let prev_sp = self.last_sp;
+        fn gain_delta(prev: f64, curr: f64) -> Option<(f64, f64)> {
+            (prev.is_finite() && (curr - prev).abs() > f64::EPSILON).then_some((prev, curr))
+        }
+        fn merge_delta(
+            existing: Option<(f64, f64)>,
+            incoming: Option<(f64, f64)>,
+        ) -> Option<(f64, f64)> {
+            match (existing, incoming) {
+                (Some((from, _)), Some((_, to))) => Some((from, to)),
+                (existing, None) => existing,
+                (None, incoming) => incoming,
+            }
+        }
+
+        let delta = GainAnnotation {
+            marker_tick: self.tick_serial,
+            kp: gain_delta(self.last_kp, cfg.kp),
+            ki: gain_delta(self.last_ki, cfg.ki),
+            kd: gain_delta(self.last_kd, cfg.kd),
+            sp: gain_delta(self.last_sp, cfg.setpoint),
+        };
         self.last_kp = cfg.kp;
         self.last_ki = cfg.ki;
         self.last_kd = cfg.kd;
         self.last_sp = cfg.setpoint;
-        if !kp_changed && !ki_changed && !kd_changed && !sp_changed {
+        if delta.kp.is_none() && delta.ki.is_none() && delta.kd.is_none() && delta.sp.is_none() {
             return;
         }
         if let Some(ann) = self.annotations.back_mut()
             && self.tick_serial.saturating_sub(ann.marker_tick) <= 3
         {
-            if kp_changed {
-                ann.kp = Some(ann.kp.map_or((prev_kp, cfg.kp), |(from, _)| (from, cfg.kp)));
-            }
-            if ki_changed {
-                ann.ki = Some(ann.ki.map_or((prev_ki, cfg.ki), |(from, _)| (from, cfg.ki)));
-            }
-            if kd_changed {
-                ann.kd = Some(ann.kd.map_or((prev_kd, cfg.kd), |(from, _)| (from, cfg.kd)));
-            }
-            if sp_changed {
-                ann.sp = Some(
-                    ann.sp
-                        .map_or((prev_sp, cfg.setpoint), |(from, _)| (from, cfg.setpoint)),
-                );
-            }
+            ann.kp = merge_delta(ann.kp, delta.kp);
+            ann.ki = merge_delta(ann.ki, delta.ki);
+            ann.kd = merge_delta(ann.kd, delta.kd);
+            ann.sp = merge_delta(ann.sp, delta.sp);
             ann.marker_tick = self.tick_serial;
             return;
         }
-        self.annotations.push_back(GainAnnotation {
-            marker_tick: self.tick_serial,
-            kp: kp_changed.then_some((prev_kp, cfg.kp)),
-            ki: ki_changed.then_some((prev_ki, cfg.ki)),
-            kd: kd_changed.then_some((prev_kd, cfg.kd)),
-            sp: sp_changed.then_some((prev_sp, cfg.setpoint)),
-        });
+        self.annotations.push_back(delta);
     }
 }
 
@@ -1822,8 +1817,8 @@ mod tests {
         }
     }
 
-    /// Regression: history cap must be max(tune_history, spark_w) so that sparklines fill
-    /// the terminal width even when tune_history < screen columns.
+    /// Regression: history cap must be `max(tune_history, spark_w)` so that sparklines fill
+    /// the terminal width even when `tune_history` < screen columns.
     #[test]
     fn history_cap_uses_spark_w_when_wider_than_tune_history() {
         // Simulate a TuneUiState with tune_history=10 but spark_w=100 (wide terminal).
@@ -1838,11 +1833,11 @@ mod tests {
         );
         // Simulate the dequeue trimming
         let mut history: VecDeque<f64> = VecDeque::new();
-        for i in 0..200usize {
+        for i in 0..200u32 {
             while history.len() >= cap {
                 history.pop_front();
             }
-            history.push_back(i as f64);
+            history.push_back(f64::from(i));
         }
         assert_eq!(history.len(), cap, "history should hold exactly cap items");
         // Conversely: if spark_w < tune_history, tune_history wins

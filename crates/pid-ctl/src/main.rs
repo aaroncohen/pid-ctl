@@ -717,6 +717,39 @@ pub(crate) fn handle_socket_request(
     }
 }
 
+/// Apply a single gain parameter (kp/ki/kd) to the session and emit the change event.
+/// Returns the old value. Gains are ordered [kp, ki, kd] throughout.
+#[cfg(unix)]
+fn apply_gain_param(
+    param: &str,
+    value: f64,
+    session: &mut ControllerSession,
+    log_file: &mut Option<std::fs::File>,
+) -> f64 {
+    // gains[0]=kp, gains[1]=ki, gains[2]=kd
+    let idx = match param {
+        "kp" => 0usize,
+        "ki" => 1,
+        "kd" => 2,
+        _ => unreachable!("apply_gain_param called with non-gain param: {param}"),
+    };
+    let cfg = session.config();
+    let mut gains = [cfg.kp, cfg.ki, cfg.kd];
+    let old = gains[idx];
+    gains[idx] = value;
+    session.set_gains(gains[0], gains[1], gains[2]);
+    json_events::emit_gains_changed(
+        log_file,
+        session.config().kp,
+        session.config().ki,
+        session.config().kd,
+        session.config().setpoint,
+        session.iter(),
+        "socket",
+    );
+    old
+}
+
 #[cfg(unix)]
 fn handle_socket_set(
     param: &str,
@@ -738,66 +771,12 @@ fn handle_socket_set(
     };
 
     match param {
-        "kp" => {
-            let old = session.config().kp;
-            session.set_gains(value, session.config().ki, session.config().kd);
-            json_events::emit_gains_changed(
-                log_file,
-                value,
-                session.config().ki,
-                session.config().kd,
-                session.config().setpoint,
-                session.iter(),
-                "socket",
-            );
+        "kp" | "ki" | "kd" => {
+            let old = apply_gain_param(param, value, session, log_file);
             (
                 Response::Set {
                     ok: true,
-                    param: String::from("kp"),
-                    old,
-                    new: value,
-                },
-                SocketSideEffect::None,
-            )
-        }
-        "ki" => {
-            let old = session.config().ki;
-            session.set_gains(session.config().kp, value, session.config().kd);
-            json_events::emit_gains_changed(
-                log_file,
-                session.config().kp,
-                value,
-                session.config().kd,
-                session.config().setpoint,
-                session.iter(),
-                "socket",
-            );
-            (
-                Response::Set {
-                    ok: true,
-                    param: String::from("ki"),
-                    old,
-                    new: value,
-                },
-                SocketSideEffect::None,
-            )
-        }
-        "kd" => {
-            let old = session.config().kd;
-            session.set_gains(session.config().kp, session.config().ki, value);
-            json_events::emit_gains_changed(
-                log_file,
-                session.config().kp,
-                session.config().ki,
-                value,
-                session.config().setpoint,
-                session.iter(),
-                "socket",
-            );
-            (
-                Response::Set {
-                    ok: true,
-                    param: String::from("kd"),
+                    param: param.to_string(),
                     old,
                     new: value,
                 },
