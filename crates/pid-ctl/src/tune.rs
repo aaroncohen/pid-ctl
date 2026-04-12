@@ -1443,12 +1443,20 @@ fn render_frame(
         chunks[0],
     );
 
+    // Layout priority: gains must always be visible, so they get a fixed slot.
+    // Process info (above) and history sparklines (below) fill the remaining space.
+    // On a very small terminal the process info shrinks first, then history shrinks;
+    // gains are never displaced.
     let body_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .constraints([
+            Constraint::Fill(1),   // [0] process info — shrinks when terminal is small
+            Constraint::Length(6), // [1] gains — always visible
+            Constraint::Fill(2),   // [2] history sparklines — gets 2x process info share
+        ])
         .split(chunks[1]);
 
-    let spark_w = body_chunks[1].width.saturating_sub(4) as usize;
+    let spark_w = body_chunks[2].width.saturating_sub(4) as usize;
     let pv_spark_full = spark_data(&ui.pv_history);
     let cv_spark_full = spark_data(&ui.cv_history);
     let pv_spark = spark_tail_slice(&pv_spark_full, spark_w);
@@ -1458,7 +1466,7 @@ fn render_frame(
     let serial_window = spark_tail_slice(&serial_vec, spark_w);
 
     let marker_row = spark_marker_row(&serial_window, &ui.annotations, spark_w);
-    let ann_w = chunks[1].width.saturating_sub(2) as usize;
+    let ann_w = body_chunks[2].width.saturating_sub(2) as usize;
     let caret_line = annotation_caret_line(&ui.annotations, ann_w);
 
     let units = args.units.as_deref().unwrap_or("");
@@ -1537,11 +1545,7 @@ fn render_frame(
          P  (proportional)   {p:>+9.4}    responds to current error\n\
          I  (integral)       {i:>+9.4}    persistent offset correction\n\
          D  (derivative)     {d:>+9.4}    PV rate (D-on-measurement)\n\
-         I accumulator       {iac:>+9.4}    {iacc_hint}\n\
-         \n\
-         GAINS — ↑↓ select   ←→ adjust   [ ] step size              s save   q quit\n\
-         ──────────────────────────────────────────────────────────────────────\n\
-         {gains_lines}",
+         I accumulator       {iac:>+9.4}    {iacc_hint}",
         sp = cfg.setpoint,
         u = units,
         pv = pv_val,
@@ -1559,7 +1563,14 @@ fn render_frame(
         d = ui.last_record.as_ref().map_or(0.0, |r| r.d),
         iac = ui.last_record.as_ref().map_or(0.0, |r| r.i_acc),
         iacc_hint = i_acc_hint,
-        gains_lines = gains_lines,
+    );
+
+    // Gains rendered in its own fixed slot so it is always visible regardless of
+    // terminal height. body_chunks[1] is Length(6): header + separator + 4 gain rows.
+    let gains_block = format!(
+        "GAINS — ↑↓ select   ←→ adjust   [ ] step size              s save   q quit\n\
+         ──────────────────────────────────────────────────────────────────────\n\
+         {gains_lines}"
     );
 
     let hist_title = format!(
@@ -1571,9 +1582,13 @@ fn render_frame(
         Paragraph::new(process_block).wrap(Wrap { trim: true }),
         body_chunks[0],
     );
+    f.render_widget(
+        Paragraph::new(gains_block).style(Style::default().fg(Color::Yellow)),
+        body_chunks[1],
+    );
 
     // Sparklines use Fill(1) so they share all remaining height equally rather than
-    // having a fixed Length that can overflow body_chunks[1] in ratatui 0.30's layout
+    // having a fixed Length that can overflow body_chunks[2] in ratatui 0.30's layout
     // engine.  Fill adapts to the available area: on a 24-row terminal each sparkline
     // gets ~3 rows (title + 2 bar rows); on a taller terminal it grows further.
     // Block::inner() subtracts 1 row for the block title, so the bar area is height-1.
@@ -1587,7 +1602,7 @@ fn render_frame(
             Constraint::Length(1), // [4] CV marker row
             Constraint::Length(1), // [5] caret line
         ])
-        .split(body_chunks[1]);
+        .split(body_chunks[2]);
 
     f.render_widget(Paragraph::new(hist_title), hist_inner[0]);
 
