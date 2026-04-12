@@ -1149,22 +1149,35 @@ fn spark_marker_row(
     chars.into_iter().collect()
 }
 
-fn annotation_caret_line(annotations: &VecDeque<GainAnnotation>, max_width: usize) -> String {
-    let parts: Vec<String> = annotations
-        .iter()
-        .map(|a| format!("^ {}", a.display_text()))
-        .collect();
-    let mut s = parts.join("  ");
-    let n = s.chars().count();
-    if n > max_width {
-        s = format!(
-            "{}…",
-            s.chars()
-                .take(max_width.saturating_sub(1))
-                .collect::<String>()
-        );
+fn annotation_caret_line(
+    serial_window: &[u64],
+    annotations: &VecDeque<GainAnnotation>,
+    max_width: usize,
+) -> String {
+    let w = max_width.max(1);
+    let mut chars: Vec<char> = vec![' '; w];
+    // Iterate oldest→newest so newer annotations overwrite older ones.
+    for ann in annotations {
+        let Some(col) = serial_window.iter().position(|s| *s == ann.marker_tick) else {
+            continue;
+        };
+        if col >= w {
+            continue;
+        }
+        let label = ann.display_text();
+        // Place the caret at the marker column, then the label text two chars to the right.
+        chars[col] = '^';
+        let text_start = col + 2;
+        for (i, ch) in label.chars().enumerate() {
+            let pos = text_start + i;
+            if pos < w {
+                chars[pos] = ch;
+            }
+        }
     }
-    s
+    // Trim trailing spaces.
+    let s: String = chars.into_iter().collect();
+    s.trim_end().to_string()
 }
 
 fn cv_fill_fraction(cv: f64, lo: f64, hi: f64) -> Option<f64> {
@@ -1480,7 +1493,7 @@ fn render_frame(
 
     let marker_row = spark_marker_row(&serial_window, &ui.annotations, spark_w);
     let ann_w = body_chunks[2].width.saturating_sub(2) as usize;
-    let caret_line = annotation_caret_line(&ui.annotations, ann_w);
+    let caret_line = annotation_caret_line(&serial_window, &ui.annotations, ann_w);
 
     let units = args.units.as_deref().unwrap_or("");
     let pv_val = ui.last_record.as_ref().map_or(0.0, |r| r.pv);
@@ -1771,7 +1784,8 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::{
-        GainAnnotation, build_export_line_values, history_trend, spark_data, spark_marker_row,
+        GainAnnotation, annotation_caret_line, build_export_line_values, history_trend, spark_data,
+        spark_marker_row,
     };
     use std::collections::VecDeque;
     use std::time::Duration;
@@ -1952,6 +1966,82 @@ mod tests {
         assert_eq!(chars[0], '|', "pipe should overwrite dot at tick 10");
         assert_eq!(chars[1], '·', "tick 20 should show dot");
         assert_eq!(chars[2], '·', "tick 30 should show dot");
+    }
+
+    #[test]
+    fn annotation_caret_aligns_with_marker_column() {
+        // Serial window: ticks 1..5, annotation at tick 3 (col 2).
+        let serials: Vec<u64> = vec![1, 2, 3, 4, 5];
+        let mut ann: VecDeque<GainAnnotation> = VecDeque::new();
+        ann.push_back(GainAnnotation {
+            marker_tick: 3,
+            kp: Some((1.0, 2.0)),
+            ki: None,
+            kd: None,
+            sp: None,
+        });
+        let line = annotation_caret_line(&serials, &ann, 20);
+        let chars: Vec<char> = line.chars().collect();
+        assert_eq!(chars[2], '^', "caret must be at col 2 (tick 3)");
+        // Label text starts two columns after the caret.
+        let label_start: String = chars[4..].iter().collect();
+        assert!(
+            label_start.starts_with("Kp 1.000→2.000"),
+            "label should start at col 4, got: {line:?}"
+        );
+    }
+
+    #[test]
+    fn annotation_caret_newer_overwrites_older() {
+        // Two annotations: older at col 0, newer at col 5.
+        // Their label text overlaps — newer should win on the overlapping chars.
+        let serials: Vec<u64> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let mut ann: VecDeque<GainAnnotation> = VecDeque::new();
+        // Older annotation at tick 1 (col 0) — long label that would extend past col 5.
+        ann.push_back(GainAnnotation {
+            marker_tick: 1,
+            kp: Some((1.0, 2.0)),
+            ki: None,
+            kd: None,
+            sp: None,
+        });
+        // Newer annotation at tick 6 (col 5) — overwrites the tail of the older label.
+        ann.push_back(GainAnnotation {
+            marker_tick: 6,
+            kp: None,
+            ki: Some((0.1, 0.5)),
+            kd: None,
+            sp: None,
+        });
+        let line = annotation_caret_line(&serials, &ann, 40);
+        let chars: Vec<char> = line.chars().collect();
+        // Newer caret must be at col 5.
+        assert_eq!(chars[5], '^', "newer caret must be at col 5 (tick 6)");
+        // Newer label text (Ki ...) must start at col 7.
+        let newer_label: String = chars[7..].iter().collect();
+        assert!(
+            newer_label.starts_with("Ki 0.100→0.500"),
+            "newer label should start at col 7, got: {line:?}"
+        );
+    }
+
+    #[test]
+    fn annotation_caret_skips_off_screen_markers() {
+        // Annotation tick not present in serial window → no output.
+        let serials: Vec<u64> = vec![10, 11, 12];
+        let mut ann: VecDeque<GainAnnotation> = VecDeque::new();
+        ann.push_back(GainAnnotation {
+            marker_tick: 99,
+            kp: Some((1.0, 2.0)),
+            ki: None,
+            kd: None,
+            sp: None,
+        });
+        let line = annotation_caret_line(&serials, &ann, 20);
+        assert!(
+            line.is_empty(),
+            "off-screen annotation should produce no output, got: {line:?}"
+        );
     }
 
     #[test]
