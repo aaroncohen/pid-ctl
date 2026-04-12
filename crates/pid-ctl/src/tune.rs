@@ -1445,7 +1445,7 @@ fn render_frame(
 
     let body_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(chunks[1]);
 
     let spark_w = body_chunks[1].width.saturating_sub(4) as usize;
@@ -1572,18 +1572,20 @@ fn render_frame(
         body_chunks[0],
     );
 
-    // PV and CV sparklines each need Length(2): 1 row for the block title ("PV"/"CV") and
-    // 1 row for the sparkline bars. With Length(1), Block::inner() subtracts 1 for the title,
-    // leaving height=0 so ratatui renders nothing (the sparklines go missing).
+    // Sparklines use Fill(1) so they share all remaining height equally rather than
+    // having a fixed Length that can overflow body_chunks[1] in ratatui 0.30's layout
+    // engine.  Fill adapts to the available area: on a 24-row terminal each sparkline
+    // gets ~3 rows (title + 2 bar rows); on a taller terminal it grows further.
+    // Block::inner() subtracts 1 row for the block title, so the bar area is height-1.
     let hist_inner = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Length(2),
+            Constraint::Length(1), // [0] HISTORY title
+            Constraint::Fill(1),   // [1] PV sparkline — expands with terminal height
+            Constraint::Length(1), // [2] PV marker row
+            Constraint::Fill(1),   // [3] CV sparkline — expands with terminal height
+            Constraint::Length(1), // [4] CV marker row
+            Constraint::Length(1), // [5] caret line
         ])
         .split(body_chunks[1]);
 
@@ -1604,16 +1606,20 @@ fn render_frame(
     );
 
     // Setpoint indicator — white dash just past the last bar on the PV sparkline.
+    // hist_inner[1].height includes the block title row, so bar rows = height - 1.
+    // We position the indicator within the bar area only (y+1 .. y+height-1) to
+    // avoid overwriting the "PV ▼ …" title on the first row.
     if let Some((pv_lo, pv_hi)) = pv_scale {
         let pv_span = pv_hi - pv_lo;
-        if pv_span > 1e-12 {
+        let bar_rows = hist_inner[1].height.saturating_sub(1);
+        if pv_span > 1e-12 && bar_rows > 0 {
             let sp_pct = ((cfg.setpoint - pv_lo) / pv_span * 100.0).clamp(0.0, 100.0);
-            let num_rows = f64::from(hist_inner[1].height);
+            let num_bar_rows = f64::from(bar_rows);
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let row_offset = ((1.0 - sp_pct / 100.0) * num_rows)
+            let row_offset = ((1.0 - sp_pct / 100.0) * num_bar_rows)
                 .floor()
-                .clamp(0.0, num_rows - 1.0) as u16;
-            let sp_y = hist_inner[1].y + row_offset;
+                .clamp(0.0, num_bar_rows - 1.0) as u16;
+            let sp_y = hist_inner[1].y + 1 + row_offset; // +1 skips the block title row
             #[allow(clippy::cast_possible_truncation)]
             let ind_x = hist_inner[1].x + pv_spark.len() as u16;
             if ind_x + 2 <= hist_inner[1].right() {
@@ -1784,36 +1790,40 @@ mod tests {
         assert_eq!(row.chars().nth(3), Some('|'));
     }
 
-    /// Regression test for sparklines going missing after layout refactor.
+    /// Regression test: sparkline slots must use Fill so they never overflow their parent
+    /// in ratatui 0.30's layout engine (which replaced cassowary with kasuari).
     ///
-    /// `Block::default().title(...)` eats 1 row for the title.  With a sparkline given
-    /// `Constraint::Length(1)` the inner height after `Block::inner()` becomes 0 and ratatui
-    /// early-exits without rendering any bars.  Each sparkline row must be at least Length(2).
+    /// Previously they used `Constraint::Length(2)` — fixed slots that summed to more rows
+    /// than the parent had, causing the layout to overflow and widgets to overlap content
+    /// above them.  Now they use `Constraint::Fill(1)` which distributes remaining height
+    /// proportionally and is guaranteed to never overflow.
     #[test]
-    fn sparkline_constraints_are_at_least_2_rows() {
+    fn sparkline_constraints_use_fill() {
         use ratatui::layout::Constraint;
-        // Minimum height required so Block::inner (which subtracts 1 for the title) still
-        // leaves ≥ 1 row for the sparkline bars.
-        const MIN_SPARK_ROWS: u16 = 2;
         // Mirror the constraints used in render_frame's hist_inner layout.
-        // Indices 1 and 3 are the PV and CV sparklines respectively.
+        // Indices 1 and 3 are the PV and CV sparklines.
         let constraints = [
-            Constraint::Length(2), // [0] history title
-            Constraint::Length(2), // [1] PV sparkline — must be ≥ MIN_SPARK_ROWS
+            Constraint::Length(1), // [0] history title
+            Constraint::Fill(1),   // [1] PV sparkline
             Constraint::Length(1), // [2] PV marker row
-            Constraint::Length(2), // [3] CV sparkline — must be ≥ MIN_SPARK_ROWS
+            Constraint::Fill(1),   // [3] CV sparkline
             Constraint::Length(1), // [4] CV marker row
-            Constraint::Length(2), // [5] caret
+            Constraint::Length(1), // [5] caret
         ];
         for idx in [1usize, 3] {
-            if let Constraint::Length(h) = constraints[idx] {
-                assert!(
-                    h >= MIN_SPARK_ROWS,
-                    "hist_inner[{idx}] (sparkline) has Length({h}) but needs ≥ {MIN_SPARK_ROWS}"
-                );
-            } else {
-                panic!("hist_inner[{idx}] is not a Length constraint");
-            }
+            assert!(
+                matches!(constraints[idx], Constraint::Fill(_)),
+                "hist_inner[{idx}] (sparkline) must be Fill — got {:?}",
+                constraints[idx]
+            );
+        }
+        // Verify fixed slots are all Length(1) — no wasted rows.
+        for idx in [0usize, 2, 4, 5] {
+            assert!(
+                matches!(constraints[idx], Constraint::Length(1)),
+                "hist_inner[{idx}] (fixed slot) must be Length(1) — got {:?}",
+                constraints[idx]
+            );
         }
     }
 
