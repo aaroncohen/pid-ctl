@@ -4,7 +4,7 @@ mod cli;
 #[allow(clippy::wildcard_imports)]
 pub(crate) use cli::*;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use pid_ctl::adapters::{
     CmdCvSink, CmdPvSource, CvSink, DryRunCvSink, FileCvSink, FilePvSource, PvSource,
     StdinPvSource, StdoutCvSink,
@@ -19,82 +19,6 @@ use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-
-// ---------------------------------------------------------------------------
-// clap top-level CLI definition (thin wrapper — args are passed through to
-// the existing hand-rolled parsing functions in cli.rs)
-// ---------------------------------------------------------------------------
-
-#[derive(Parser)]
-#[command(name = "pid-ctl", about = "PID loop controller", disable_help_subcommand = true)]
-struct Cli {
-    #[command(subcommand)]
-    command: SubCommand,
-}
-
-#[derive(Subcommand)]
-enum SubCommand {
-    /// Run one PID tick and exit
-    Once {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Run a continuous PID control loop
-    Loop {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Read PV lines from stdin and emit CV to stdout
-    Pipe {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Show controller status
-    Status {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Send a set command via socket
-    #[cfg(unix)]
-    Set {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Send a hold command via socket
-    #[cfg(unix)]
-    Hold {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Send a resume command via socket
-    #[cfg(unix)]
-    Resume {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Send a reset command via socket
-    #[cfg(unix)]
-    Reset {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Send a save command via socket
-    #[cfg(unix)]
-    Save {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Purge persisted state file
-    Purge {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Initialise a new state file
-    Init {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-}
 
 fn main() {
     let full_argv: Vec<String> = std::env::args().collect();
@@ -132,16 +56,16 @@ fn run(
     #[cfg_attr(not(feature = "tui"), allow(unused_variables))] full_argv: &[String],
 ) -> Result<(), CliError> {
     match cli.command {
-        SubCommand::Once { args } => {
-            let parsed = parse_once(&args)?;
+        SubCommand::Once(raw) => {
+            let parsed = parse_once(&raw)?;
             run_once(&parsed)
         }
-        SubCommand::Pipe { args } => {
-            let parsed = parse_pipe(&args)?;
+        SubCommand::Pipe(raw) => {
+            let parsed = parse_pipe(&raw)?;
             run_pipe(&parsed)
         }
-        SubCommand::Loop { args } => {
-            let mut parsed = parse_loop(&args)?;
+        SubCommand::Loop(raw) => {
+            let mut parsed = parse_loop(&raw)?;
             #[cfg(feature = "tui")]
             if parsed.tune {
                 return tune::run(parsed, full_argv);
@@ -154,26 +78,28 @@ fn run(
             }
             run_loop(&mut parsed)
         }
-        SubCommand::Status { args } => {
-            let flags = parse_status_flags(&args)?;
+        SubCommand::Status(raw) => {
+            let flags = parse_status_flags(&raw)?;
             run_status_dispatch(&flags)
         }
         #[cfg(unix)]
-        SubCommand::Set { args } => run_socket_set(&args),
+        SubCommand::Set(raw) => run_socket_set(&raw),
         #[cfg(unix)]
-        SubCommand::Hold { args } => run_socket_hold(&args),
+        SubCommand::Hold(raw) => run_socket_hold(&raw),
         #[cfg(unix)]
-        SubCommand::Resume { args } => run_socket_resume(&args),
+        SubCommand::Resume(raw) => run_socket_resume(&raw),
         #[cfg(unix)]
-        SubCommand::Reset { args } => run_socket_reset(&args),
+        SubCommand::Reset(raw) => run_socket_reset(&raw),
         #[cfg(unix)]
-        SubCommand::Save { args } => run_socket_save(&args),
-        SubCommand::Purge { args } => {
-            let state_path = parse_state_flag(&args, "purge")?;
+        SubCommand::Save(raw) => run_socket_save(&raw),
+        SubCommand::Purge(raw) => {
+            let state_path = get_state_path(&raw)
+                .map_err(|_| CliError::config("purge requires --state"))?;
             run_purge(&state_path)
         }
-        SubCommand::Init { args } => {
-            let state_path = parse_state_flag(&args, "init")?;
+        SubCommand::Init(raw) => {
+            let state_path = get_state_path(&raw)
+                .map_err(|_| CliError::config("init requires --state"))?;
             run_init(&state_path)
         }
     }
@@ -1133,32 +1059,32 @@ fn socket_send_and_print(
 }
 
 #[cfg(unix)]
-fn run_socket_hold(args: &[String]) -> Result<(), CliError> {
-    let path = parse_socket_control_flag(args, "hold")?;
+fn run_socket_hold(raw: &SocketOnlyArgs) -> Result<(), CliError> {
+    let path = get_socket_path(raw);
     socket_send_and_print(&path, &pid_ctl::socket::Request::Hold, "hold")
 }
 
 #[cfg(unix)]
-fn run_socket_resume(args: &[String]) -> Result<(), CliError> {
-    let path = parse_socket_control_flag(args, "resume")?;
+fn run_socket_resume(raw: &SocketOnlyArgs) -> Result<(), CliError> {
+    let path = get_socket_path(raw);
     socket_send_and_print(&path, &pid_ctl::socket::Request::Resume, "resume")
 }
 
 #[cfg(unix)]
-fn run_socket_reset(args: &[String]) -> Result<(), CliError> {
-    let path = parse_socket_control_flag(args, "reset")?;
+fn run_socket_reset(raw: &SocketOnlyArgs) -> Result<(), CliError> {
+    let path = get_socket_path(raw);
     socket_send_and_print(&path, &pid_ctl::socket::Request::Reset, "reset")
 }
 
 #[cfg(unix)]
-fn run_socket_save(args: &[String]) -> Result<(), CliError> {
-    let path = parse_socket_control_flag(args, "save")?;
+fn run_socket_save(raw: &SocketOnlyArgs) -> Result<(), CliError> {
+    let path = get_socket_path(raw);
     socket_send_and_print(&path, &pid_ctl::socket::Request::Save, "save")
 }
 
 #[cfg(unix)]
-fn run_socket_set(args: &[String]) -> Result<(), CliError> {
-    let parsed = parse_set_args(args)?;
+fn run_socket_set(raw: &SetRawArgs) -> Result<(), CliError> {
+    let parsed = parse_set_args(raw);
     let req = pid_ctl::socket::Request::Set {
         param: parsed.param,
         value: parsed.value,
