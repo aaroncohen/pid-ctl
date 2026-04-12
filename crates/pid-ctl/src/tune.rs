@@ -232,6 +232,10 @@ impl TuneUiState {
 const TUNE_IDLE_DRAW_MIN: Duration = Duration::from_millis(200);
 /// Redraw at least this often when the next tick is near so the countdown stays legible.
 const TUNE_IDLE_DRAW_DEADLINE_NEAR: Duration = Duration::from_millis(120);
+/// Fixed row height of the gains section (header + separator + 4 gain rows).
+const GAINS_H: u16 = 6;
+/// Minimum rows reserved for process info before sparklines start collapsing.
+const PROCESS_MIN: u16 = 5;
 
 /// Runs the interactive tuning dashboard until the operator quits or a fatal loop error occurs.
 // The event loop integrates input, PID ticking, socket servicing, and throttled redraws in one
@@ -1443,16 +1447,25 @@ fn render_frame(
         chunks[0],
     );
 
-    // Layout priority: gains must always be visible, so they get a fixed slot.
-    // Process info (above) and history sparklines (below) fill the remaining space.
-    // On a very small terminal the process info shrinks first, then history shrinks;
-    // gains are never displaced.
+    // Layout priority (highest → lowest): gains → process info → sparklines.
+    // Sparklines must disappear first: they only receive rows that remain after
+    // gains (fixed at GAINS_H) and process info (guaranteed PROCESS_MIN rows with
+    // any excess split 1:2 between process and sparklines).  A sparkline area
+    // smaller than 2 rows (title + 0 bars) is useless, so we collapse it to zero.
+    let body_h = chunks[1].height;
+    let after_gains = body_h.saturating_sub(GAINS_H);
+    let excess = after_gains.saturating_sub(PROCESS_MIN);
+    let process_h = PROCESS_MIN + excess / 3; // process grows at 1/3 rate
+    let raw_spark_h = after_gains.saturating_sub(process_h);
+    let spark_h = if raw_spark_h < 2 { 0 } else { raw_spark_h };
+    let process_h = after_gains.saturating_sub(spark_h);
+
     let body_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Fill(1),   // [0] process info — shrinks when terminal is small
-            Constraint::Length(6), // [1] gains — always visible
-            Constraint::Fill(2),   // [2] history sparklines — gets 2x process info share
+            Constraint::Length(process_h), // [0] process info
+            Constraint::Length(GAINS_H),   // [1] gains — always visible
+            Constraint::Length(spark_h),   // [2] history sparklines — first to collapse
         ])
         .split(chunks[1]);
 
