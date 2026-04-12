@@ -5,7 +5,7 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.86"
 repository = "https://github.com/aaroncohen/pid-ctl"
 readme = "README.md"
 keywords = ["pid", "control", "cli", "automation", "industrial"]
@@ -24,7 +24,7 @@ fs2 = "0.4.3"
 ctrlc = "3"
 wait-timeout = "0.2.1"
 time = { version = "0.3.47", default-features = false, features = ["parsing", "formatting", "macros"] }
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 portable-pty = "0.9.0"
 clap = { version = "4.6.0", features = ["derive", "std"] }
