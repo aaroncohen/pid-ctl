@@ -46,7 +46,21 @@ enum GainFocus {
 struct GainAnnotation {
     /// Tick column for the `|` marker (latest tick in the merge group).
     marker_tick: u64,
-    text: String,
+    kp: Option<(f64, f64)>,
+    ki: Option<(f64, f64)>,
+    kd: Option<(f64, f64)>,
+    sp: Option<(f64, f64)>,
+}
+
+impl GainAnnotation {
+    fn display_text(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some((f, t)) = self.kp { parts.push(format!("Kp {f:.3}→{t:.3}")); }
+        if let Some((f, t)) = self.ki { parts.push(format!("Ki {f:.3}→{t:.3}")); }
+        if let Some((f, t)) = self.kd { parts.push(format!("Kd {f:.3}→{t:.3}")); }
+        if let Some((f, t)) = self.sp { parts.push(format!("SP {f:.3}→{t:.3}")); }
+        parts.join("  ")
+    }
 }
 
 impl GainFocus {
@@ -156,37 +170,37 @@ impl TuneUiState {
     }
 
     fn note_gain_change(&mut self, _args: &LoopArgs, cfg: &PidConfig) {
-        let mut parts = Vec::new();
-        if self.last_kp.is_finite() && (cfg.kp - self.last_kp).abs() > f64::EPSILON {
-            parts.push(format!("Kp {:.3}→{:.3}", self.last_kp, cfg.kp));
-        }
-        if self.last_ki.is_finite() && (cfg.ki - self.last_ki).abs() > f64::EPSILON {
-            parts.push(format!("Ki {:.3}→{:.3}", self.last_ki, cfg.ki));
-        }
-        if self.last_kd.is_finite() && (cfg.kd - self.last_kd).abs() > f64::EPSILON {
-            parts.push(format!("Kd {:.3}→{:.3}", self.last_kd, cfg.kd));
-        }
-        if self.last_sp.is_finite() && (cfg.setpoint - self.last_sp).abs() > f64::EPSILON {
-            parts.push(format!("SP {:.3}→{:.3}", self.last_sp, cfg.setpoint));
-        }
+        let kp_changed = self.last_kp.is_finite() && (cfg.kp - self.last_kp).abs() > f64::EPSILON;
+        let ki_changed = self.last_ki.is_finite() && (cfg.ki - self.last_ki).abs() > f64::EPSILON;
+        let kd_changed = self.last_kd.is_finite() && (cfg.kd - self.last_kd).abs() > f64::EPSILON;
+        let sp_changed = self.last_sp.is_finite() && (cfg.setpoint - self.last_sp).abs() > f64::EPSILON;
+        let prev_kp = self.last_kp;
+        let prev_ki = self.last_ki;
+        let prev_kd = self.last_kd;
+        let prev_sp = self.last_sp;
         self.last_kp = cfg.kp;
         self.last_ki = cfg.ki;
         self.last_kd = cfg.kd;
         self.last_sp = cfg.setpoint;
-        if parts.is_empty() {
+        if !kp_changed && !ki_changed && !kd_changed && !sp_changed {
             return;
         }
-        let text = parts.join("  ");
         if let Some(ann) = self.annotations.back_mut()
             && self.tick_serial.saturating_sub(ann.marker_tick) <= 3
         {
-            ann.text = format!("{} · {}", ann.text, text);
+            if kp_changed { ann.kp = Some(ann.kp.map_or((prev_kp, cfg.kp), |(from, _)| (from, cfg.kp))); }
+            if ki_changed { ann.ki = Some(ann.ki.map_or((prev_ki, cfg.ki), |(from, _)| (from, cfg.ki))); }
+            if kd_changed { ann.kd = Some(ann.kd.map_or((prev_kd, cfg.kd), |(from, _)| (from, cfg.kd))); }
+            if sp_changed { ann.sp = Some(ann.sp.map_or((prev_sp, cfg.setpoint), |(from, _)| (from, cfg.setpoint))); }
             ann.marker_tick = self.tick_serial;
             return;
         }
         self.annotations.push_back(GainAnnotation {
             marker_tick: self.tick_serial,
-            text,
+            kp: kp_changed.then_some((prev_kp, cfg.kp)),
+            ki: ki_changed.then_some((prev_ki, cfg.ki)),
+            kd: kd_changed.then_some((prev_kd, cfg.kd)),
+            sp: sp_changed.then_some((prev_sp, cfg.setpoint)),
         });
     }
 }
@@ -945,24 +959,56 @@ fn draw(
     Ok(())
 }
 
+fn expand_scale(lo: f64, hi: f64, center: f64) -> (f64, f64) {
+    let min_span = (0.01 * center.abs()).max(1e-9);
+    let actual_span = hi - lo;
+    if actual_span >= min_span {
+        return (lo, hi);
+    }
+    let half = (min_span * 0.5).max(hi - center).max(center - lo);
+    (center - half, center + half)
+}
+
+fn history_range(history: &VecDeque<f64>) -> Option<(f64, f64)> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    let mut sum = 0.0f64;
+    let mut count = 0usize;
+    for &v in history {
+        if v.is_finite() {
+            lo = lo.min(v);
+            hi = hi.max(v);
+            sum += v;
+            count += 1;
+        }
+    }
+    if count == 0 { return None; }
+    let mean = sum / count as f64;
+    Some(expand_scale(lo, hi, mean))
+}
+
 fn spark_data(values: &VecDeque<f64>) -> Vec<u64> {
     if values.is_empty() {
         return vec![];
     }
     let mut min_v = f64::INFINITY;
     let mut max_v = f64::NEG_INFINITY;
-    let mut any_finite = false;
+    let mut sum = 0.0f64;
+    let mut count = 0usize;
     for &v in values {
         if v.is_finite() {
-            any_finite = true;
             min_v = min_v.min(v);
             max_v = max_v.max(v);
+            sum += v;
+            count += 1;
         }
     }
-    if !any_finite {
+    if count == 0 {
         return vec![0; values.len()];
     }
-    let span = max_v - min_v;
+    let mean = sum / count as f64;
+    let (lo, hi) = expand_scale(min_v, max_v, mean);
+    let span = hi - lo;
     if span <= 1e-9 {
         // Constant series: `(v - min) / span` would be all zeros — ratatui draws no visible bars.
         // Use a flat mid-line so history is visible (e.g. dry-run + sim: PV stuck until CV reaches plant).
@@ -976,7 +1022,7 @@ fn spark_data(values: &VecDeque<f64>) -> Vec<u64> {
             }
             // Value is clamped to [0.0, 100.0] before rounding, so truncation and sign loss are safe.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            { (((v - min_v) / span) * 100.0).clamp(0.0, 100.0).round() as u64 }
+            { (((v - lo) / span) * 100.0).clamp(0.0, 100.0).round() as u64 }
         })
         .collect()
 }
@@ -1010,7 +1056,7 @@ fn spark_marker_row(
 fn annotation_caret_line(annotations: &VecDeque<GainAnnotation>, max_width: usize) -> String {
     let parts: Vec<String> = annotations
         .iter()
-        .map(|a| format!("^ {}", a.text))
+        .map(|a| format!("^ {}", a.display_text()))
         .collect();
     let mut s = parts.join("  ");
     let n = s.chars().count();
@@ -1111,18 +1157,13 @@ fn step_cell_for_row(focus: GainFocus, row: usize, step: &[f64; 4]) -> String {
     }
 }
 
-fn pv_history_trend(pv: &VecDeque<f64>) -> &'static str {
-    if pv.len() < 2 {
-        return "";
-    }
-    let first = *pv.front().unwrap();
-    let last = *pv.back().unwrap();
-    if last > first + 1e-9 {
-        "trending ▲"
-    } else if last < first - 1e-9 {
-        "trending ▼"
-    } else {
-        "stable"
+fn history_trend(history: &VecDeque<f64>) -> &'static str {
+    let first = history.iter().find(|v| v.is_finite()).copied();
+    let last = history.iter().rev().find(|v| v.is_finite()).copied();
+    match (first, last) {
+        (Some(f), Some(l)) if l > f + 1e-9 => "▲",
+        (Some(f), Some(l)) if l < f - 1e-9 => "▼",
+        _ => "→",
     }
 }
 
@@ -1368,7 +1409,7 @@ fn render_frame(
         gains_lines = gains_lines,
     );
 
-    let trend = pv_history_trend(&ui.pv_history);
+    let trend = history_trend(&ui.pv_history);
     let hist_title = format!(
         "HISTORY (last {} ticks / ~{:.0}s wall at {:.1}s interval)  {}",
         args.tune_history, hist_wall_s, interval_secs, trend
@@ -1483,7 +1524,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::{
-        GainAnnotation, TuneUiState, build_export_line_values, pv_history_trend, spark_data,
+        GainAnnotation, TuneUiState, build_export_line_values, history_trend, spark_data,
         spark_marker_row,
     };
     use std::collections::VecDeque;
@@ -1513,7 +1554,7 @@ mod tests {
         let mut d = VecDeque::new();
         d.push_back(1.0);
         d.push_back(3.0);
-        assert_eq!(pv_history_trend(&d), "trending ▲");
+        assert_eq!(history_trend(&d), "▲");
     }
 
     #[test]
@@ -1522,7 +1563,10 @@ mod tests {
         let mut ann = VecDeque::new();
         ann.push_back(GainAnnotation {
             marker_tick: 4,
-            text: "Kp 1→2".into(),
+            kp: Some((1.0, 2.0)),
+            ki: None,
+            kd: None,
+            sp: None,
         });
         let row = spark_marker_row(&serials, &ann, 5);
         assert_eq!(row.chars().nth(3), Some('|'));
