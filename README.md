@@ -1,8 +1,12 @@
 # pid-ctl
 
-**pid-ctl** is a Rust workspace that provides a deterministic PID controller library, a command-line control loop for Unix-style automation, and optional simulated plants for tuning experiments. Use it to close the loop between a **process variable (PV)** you measure and a **control variable (CV)** you actuate—whether that is a shell command, a file, a pipe, or a simulator.
+**What this is for (in plain terms).** A lot of real-world jobs boil down to: read a number from somewhere (a sensor, a file, a small script), compare it to the number you want, and adjust something you control—a heater duty cycle, a fan speed, a valve, a PWM line—then do it again on a schedule or as new readings arrive. You are not clicking buttons in a vendor GUI; you are wiring **measurement → decision → output** into scripts, `cron`, `systemd`, or pipelines, the same way you would chain `grep`, `awk`, and `curl`.
 
-Full behavioral contracts, flag precedence, and I/O semantics are specified in [`pid-ctl_plan.md`](./pid-ctl_plan.md).
+**pid-ctl** is a program (and a small Rust library) that automates that “decision” step. You tell it your **target**, where to **read** the current value, and where to **write** the next control value, using files, shell commands, standard input/output, or optional simulated hardware for practice. It is built for people who already live on the command line and want feedback control without standing up a full industrial SCADA stack.
+
+**What “PID” means here.** You do not need prior control-theory coursework. A **PID** controller is a widely used, standard way to compute *how much* to nudge the output so the measurement moves toward the target: a **P** term reacts to the error right now, an **I** term corrects drift that persists over time, and a **D** term reacts to how fast the measurement is changing. The defaults and flags in this tool encode those behaviors; you can tune gains, limits, and safety settings from the CLI or a small live dashboard.
+
+**How this README is written.** Sections below use **PV** (*process variable*) for the measured value you read, and **CV** (*control variable*) for the value you send to the actuator—common shorthand in process control. The workspace is a Rust project with three crates: the math core, the CLI, and an optional simulator. Exact behavior (exit codes, edge cases, JSON shapes) is specified in [`pid-ctl_plan.md`](./pid-ctl_plan.md).
 
 ## Features
 
@@ -28,6 +32,24 @@ Full behavioral contracts, flag precedence, and I/O semantics are specified in [
 
 - **First-order**, **thermal**, and **fan** plant models with JSON state on disk.
 - **`print-pv`** / **`apply-cv`** commands align with `pid-ctl loop --pv-cmd` / `--cv-cmd` for **closed-loop** experiments and **`loop --tune`**.
+
+## Design & opinions
+
+This project is built for **operators and automation** who already live in shells, systemd, and ad hoc scripts—not as a replacement for a full PLC/SCADA stack. The shape of the tool follows from that.
+
+**Unix composition over embedded UI.** The primary interface is a CLI that fits pipes, `cron`, and one-shot scripts. Long-running control uses **`loop`**; streaming or externally paced workloads use **`pipe`**; idempotent “tick and exit” jobs use **`once`**. We split those deliberately: mixing them would blur who owns timing (you, the wall clock, or the controller).
+
+**`pipe` vs `loop --pv-stdin`.** In v1, **`pipe`** is a **pure stream transformer**: stdin PV lines in, stdout CV lines out, no sleeps, and **no built-in CV sink**—the next stage in the shell pipeline owns actuation. **`loop`** owns a **fixed interval**, deadline-style scheduling (drift does not accumulate as a backlog of ticks), and optional **socket control**, **TUI tuning**, and richer operational flags. If the stream should drive the cadence, use `pipe`; if the controller should drive the cadence and you want daemon-style behavior, use `loop` (with `--pv-stdin` when PV arrives on stdin under the loop’s timing).
+
+**Determinism where it matters.** `pid-ctl-core` does **no I/O**: only validated configuration and `step` math. That keeps the control law **testable**, reproducible in requirements tests, and safe to reason about. All filesystem, subprocess, and terminal concerns live in `pid-ctl`, behind small adapters.
+
+**Control-law defaults.** The implementation uses **position form** PID with **derivative on measurement** to reduce setpoint kick, plus explicit anti-windup, optional slew limits, and setpoint ramping. Those choices match common process-control practice; if you need a different formulation, the core is the place to swap or extend—not hidden inside the CLI.
+
+**Operability and automation.** **JSON state** on disk and a **Unix-domain socket** API exist so you can script setpoint and gains, query status, and integrate with supervision—without reserving a TTY. Structured **NDJSON** logs and a versioned state schema favor **auditability** and downstream tooling (including LLM-assisted ops). The interactive **`--tune`** dashboard is optional (feature-gated) so headless builds stay lean.
+
+**Safety posture.** The plan emphasizes **reliability**: bounded command timeouts, policies for consecutive PV/CV/state failures, optional **safe CV** on fault paths, and file locking around state. These are **opinionated guardrails** for real hardware or irreversible actuators; they trade some flexibility for predictable failure modes.
+
+**Normative specification.** Behavior is not “discover by trial”: [`pid-ctl_plan.md`](./pid-ctl_plan.md) is the **contract** (exit codes, flag interactions, JSON shapes). The README is the map; the plan is the source of truth.
 
 ## Requirements
 
@@ -75,54 +97,136 @@ Run `pid-ctl --help` and `pid-ctl <subcommand> --help` for the full flag list.
 
 Common PID-related flags (where supported) include `--setpoint`, `--kp`, `--ki`, `--kd`, `--out-min`, `--out-max`, `--deadband`, `--setpoint-ramp`, `--slew-rate`, `--pv-filter`, `--anti-windup`, `--anti-windup-tt`, `--dt`, `--min-dt`, `--max-dt`, `--dt-clamp`, `--scale`, `--cv-precision`, and `--reset-accumulator`. Durations accept forms like `500ms`, `2s`, or bare seconds.
 
-## Examples
+## Examples (by mode)
 
-### One-shot tick (`once`)
+The snippets below are practical starting points. Substitution tokens (`broker`, paths to sysfs, etc.) must match your machine. See [`pid-ctl_plan.md`](./pid-ctl_plan.md) for `{cv}` / `{cv:url}`, timeouts, and exit codes.
 
-Compute CV for a single measurement of `42.0`, send CV to stdout, default gains:
+### `once` — single tick and exit
+
+Use when **you** own the schedule (`cron`, `udev`, a wrapper script). Each invocation reads PV once, updates optional `--state`, writes CV, and exits.
+
+**Literal PV, CV on stdout** (handy for capturing in a variable):
 
 ```bash
-pid-ctl once --pv 42 --cv-stdout --setpoint 40 --kp 1 --ki 0.1 --kd 0
+REFLUX=$(pid-ctl once \
+  --pv 78.4 --setpoint 78.1 \
+  --kp 1.5 --ki 0.3 --kd 0 \
+  --out-min 0 --out-max 100 \
+  --state /tmp/still.json \
+  --cv-stdout --quiet)
+echo "command heater $REFLUX"
 ```
 
-Dry-run (no CV sink): compute only, useful with `--format json` or `--log` for inspection.
+**PV from a file, CV to a file** (e.g. sysfs-style values):
 
-### Pipeline (`pipe`)
+```bash
+pid-ctl once \
+  --pv-file /tmp/sensor_pv.txt \
+  --cv-file /tmp/actuator_cv.txt \
+  --setpoint 100 --kp 2 --ki 0.1 --kd 0 \
+  --state /tmp/pid.json
+```
 
-Each non-empty stdin line is parsed as a PV sample; CV is written to stdout. Elapsed time between lines becomes `dt` after the first sample (the first tick uses `--dt`, default `1` second if unset):
+**PV and CV via shell commands** (each `--pv-cmd` must print one numeric line; `--cv-cmd` supports `{cv}` substitution):
+
+```bash
+pid-ctl once \
+  --pv-cmd "curl -fsS http://sensor.local/temp | jq -r .c" \
+  --cv-cmd 'mosquitto_pub -h broker -t heater/duty -m "{cv}"' \
+  --setpoint 21 --kp 1 --ki 0.05 --kd 0 \
+  --out-min 0 --out-max 100 \
+  --state /var/lib/pid-ctl/room.json
+```
+
+**Dry-run** (compute CV but do not require a CV sink — combine with `--format json` or `--log` to inspect):
+
+```bash
+pid-ctl once --pv 20 --setpoint 22 --kp 1 --ki 0 --kd 0 --dry-run --format json
+```
+
+### `pipe` — stream in, stream out
+
+**External process owns timing**: one PID tick per non-empty stdin line; CV goes to stdout. First tick uses `--dt` (default 1s if omitted); later ticks use **elapsed wall time** between lines. **No** `--cv-cmd` / `--cv-file` on `pipe` — pipe the output to the next command.
+
+**Minimal check:**
 
 ```bash
 printf '10\n11\n12\n' | pid-ctl pipe --setpoint 20 --kp 0.5 --ki 0 --kd 0
 ```
 
-### Periodic loop with a file PV
+**Tail a log, actuate in the next pipeline stage:**
 
-Re-read a file each tick (application writes the current PV into the file):
+```bash
+tail -f /var/log/sensor.log \
+  | awk '/temp/ {print $4}' \
+  | pid-ctl pipe --setpoint 60 --kp 0.5 --ki 0.1 --kd 0 --out-min 0 --out-max 255 \
+  | xargs -I{} sh -c 'echo {} > /path/to/actuator'
+```
+
+**Synthetic stream for testing:**
+
+```bash
+seq 0 100 | awk '{print 20 + $1 * 0.1}' \
+  | pid-ctl pipe --setpoint 25 --kp 2 --ki 0.2 --kd 0.1 --out-min 0 --out-max 100
+```
+
+### `loop` — fixed interval, daemon-style
+
+**`--interval`** drives the schedule (deadline-based: no backlog of missed ticks). **PV** comes from exactly one of `--pv-file`, `--pv-cmd`, or `--pv-stdin`.
+
+**File PV** (something else writes the current PV each tick):
 
 ```bash
 pid-ctl loop \
-  --interval 500ms \
+  --interval 2s \
   --pv-file /tmp/pv.txt \
   --cv-stdout \
-  --setpoint 100 --kp 2 --ki 0.05 --kd 0.01 \
-  --state /tmp/pid.json
+  --setpoint 55 --kp 0.8 --ki 0.05 --kd 0.2 \
+  --out-min 0 --out-max 100 \
+  --state /tmp/fan.json --name fan-demo
 ```
 
-### Loop with commands for PV and CV
-
-Use `--pv-cmd` to run a command that prints one numeric line, and `--cv-cmd` to deliver the CV (exact substitution semantics are documented in `pid-ctl_plan.md`):
+**Command PV and command CV** (HTTP/MQTT/CLI tools):
 
 ```bash
 pid-ctl loop \
-  --interval 1s \
-  --pv-cmd "./read-sensor.sh" \
-  --cv-cmd "./write-actuator.sh {cv}" \
-  --setpoint 0 --kp 1 --ki 0 --kd 0
+  --interval 5s \
+  --pv-cmd "mosquitto_sub -h 192.168.1.10 -t still/temp -C 1" \
+  --cv-cmd 'mosquitto_pub -h 192.168.1.10 -t still/reflux -m "{cv}"' \
+  --setpoint 78.3 --kp 1.5 --ki 0.2 --kd 0.8 \
+  --out-min 0 --out-max 100 \
+  --state /var/lib/pid-ctl/still.json
 ```
 
-### Interactive tuning with the simulator
+**Stdin PV (`--pv-stdin`)** — the **loop’s timer** decides when each tick runs; each tick waits up to `--pv-stdin-timeout` for one line (use for serial streams where you still want `loop`’s interval, `--state`, `--socket`, or `--tune`):
 
-Initialize plant state, then run the controller in tuning mode with PV/CV wired to `pid-ctl-sim`. Use the **same** `--state` path for the plant JSON as in the upstream docs; match `--interval` on the loop with `--dt` on `apply-cv`.
+```bash
+cat /dev/ttyUSB0 \
+  | pid-ctl loop --pv-stdin --pv-stdin-timeout 2s \
+      --interval 5s \
+      --cv-file /sys/class/hwmon/hwmon0/pwm1 \
+      --setpoint 65 --kp 1 --ki 0.1 --kd 0.2 \
+      --out-min 0 --out-max 255 \
+      --state /tmp/serial-fan.json
+```
+
+### `loop --tune` — interactive dashboard
+
+Requires a TTY and the default `tui` feature. **Only** valid on `loop` (not `once` or `pipe`).
+
+**Live hardware or MQTT** (same as a normal `loop`, plus `--tune`):
+
+```bash
+pid-ctl loop \
+  --pv-cmd "mosquitto_sub -h broker -t proc/temp -C 1" \
+  --cv-cmd 'mosquitto_pub -h broker -t proc/cv -m "{cv}"' \
+  --interval 5s --setpoint 78 --kp 1.5 --ki 0.2 --kd 0.8 \
+  --out-min 0 --out-max 100 \
+  --state /var/lib/pid-ctl/proc.json --units °C \
+  --tune
+```
+
+**Closed loop with `pid-ctl-sim`** (match `--interval` to `--dt` on `apply-cv`; use paths to your built binaries):
 
 ```bash
 cargo build -p pid-ctl -p pid-ctl-sim
@@ -135,24 +239,72 @@ cargo build -p pid-ctl -p pid-ctl-sim
   --interval 500ms --setpoint 22 --kp 0.5 --ki 0.02 --kd 0
 ```
 
-`--dry-run` on the loop suppresses CV output (the plant does not see the actuator). In the TUI you can also toggle behavior interactively; see `--help` for tune-related step sizes and `--tune-history`.
+Use **`--dry-run`** on the loop to suppress CV output so the simulated plant does not move; you can also toggle behavior inside the TUI.
 
-### Structured logs
+### State file: `init`, `purge`, `status`
 
-Append NDJSON records to a file for post-processing:
+**Create or reset** a controller state file (fails if another process holds the lock):
 
 ```bash
-pid-ctl loop --pv-file /tmp/pv.txt --cv-stdout --interval 1s --log /tmp/run.ndjson \
-  --setpoint 0 --kp 1 --ki 0 --kd 0
+pid-ctl init --state /tmp/pid.json
 ```
 
-### Unix socket (live loop)
-
-Start the loop with a socket path, then from another terminal:
+**Wipe runtime integrator/history fields** while keeping gains (see plan for exact fields):
 
 ```bash
-pid-ctl set --socket /tmp/pid.sock --param sp --value 75
+pid-ctl purge --state /tmp/pid.json
+```
+
+**Inspect persisted snapshot** (offline):
+
+```bash
+pid-ctl status --state /tmp/pid.json
+```
+
+### Unix socket — live `loop` control
+
+Start **`loop`** with **`--socket`** (Unix only). From other terminals you can query and command the running process without a TTY.
+
+**Terminal A — controller:**
+
+```bash
+pid-ctl loop \
+  --interval 2s \
+  --pv-file /tmp/pv.txt \
+  --cv-stdout \
+  --setpoint 50 --kp 1 --ki 0.1 --kd 0 \
+  --state /tmp/pid.json \
+  --socket /tmp/pid.sock --socket-mode 0600
+```
+
+**Terminal B — operator / automation:**
+
+```bash
 pid-ctl status --socket /tmp/pid.sock
+pid-ctl set --socket /tmp/pid.sock --param sp --value 75
+pid-ctl hold --socket /tmp/pid.sock
+pid-ctl resume --socket /tmp/pid.sock
+pid-ctl reset --socket /tmp/pid.sock
+pid-ctl save --socket /tmp/pid.sock
+```
+
+`set` accepts `--param` values such as `kp`, `ki`, `kd`, `sp`, and `interval` (see `--help`).
+
+**Status with fallback** — try the socket first, then read `--state` if the loop is not running:
+
+```bash
+pid-ctl status --socket /tmp/pid.sock --state /tmp/pid.json
+```
+
+### Structured logs (`--log`)
+
+NDJSON events go to stderr and/or a file; use for dashboards or post-processing:
+
+```bash
+pid-ctl loop \
+  --pv-file /tmp/pv.txt --cv-stdout --interval 1s \
+  --setpoint 0 --kp 1 --ki 0 --kd 0 \
+  --log /tmp/run.ndjson
 ```
 
 ## Specification
