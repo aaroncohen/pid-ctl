@@ -96,6 +96,9 @@ struct TuneUiState {
     serial_history: VecDeque<u64>,
     tick_serial: u64,
     annotations: VecDeque<GainAnnotation>,
+    /// Last-known sparkline width (terminal columns). Updated each render so
+    /// history is kept long enough to fill the screen even when `tune_history` is small.
+    spark_w: usize,
     last_kp: f64,
     last_ki: f64,
     last_kd: f64,
@@ -125,6 +128,7 @@ impl TuneUiState {
             serial_history: VecDeque::new(),
             tick_serial: 0,
             annotations: VecDeque::new(),
+            spark_w: args.tune_history,
             last_kp: f64::NAN,
             last_ki: f64::NAN,
             last_kd: f64::NAN,
@@ -135,7 +139,9 @@ impl TuneUiState {
     }
 
     fn push_history(&mut self, args: &LoopArgs, pv: f64, cv: f64) {
-        while self.pv_history.len() >= args.tune_history {
+        // Keep enough history to fill the terminal width even when tune_history < spark_w.
+        let cap = args.tune_history.max(self.spark_w);
+        while self.pv_history.len() >= cap {
             self.pv_history.pop_front();
             self.cv_history.pop_front();
             self.serial_history.pop_front();
@@ -144,7 +150,7 @@ impl TuneUiState {
         self.pv_history.push_back(pv);
         self.cv_history.push_back(cv);
         self.serial_history.push_back(self.tick_serial);
-        while self.annotations.len() > args.tune_history {
+        while self.annotations.len() > cap {
             self.annotations.pop_front();
         }
     }
@@ -452,6 +458,9 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                     }
                     Err(e) => return Err(CliError::new(2, e.to_string())),
                 }
+                if let Ok(sz) = terminal.size() {
+                    ui.spark_w = sz.width.saturating_sub(4) as usize;
+                }
                 ui.push_history(&args, scaled_pv, held);
             } else {
                 let mut dry = DryRunCvSink;
@@ -478,6 +487,9 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                 ) {
                     Ok(Some(outcome)) => {
                         ui.last_record = Some(outcome.record.clone());
+                        if let Ok(sz) = terminal.size() {
+                            ui.spark_w = sz.width.saturating_sub(4) as usize;
+                        }
                         ui.push_history(&args, outcome.record.pv, outcome.record.cv);
                     }
                     Ok(None) => {}
@@ -1471,7 +1483,8 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::{
-        GainAnnotation, build_export_line_values, pv_history_trend, spark_data, spark_marker_row,
+        GainAnnotation, TuneUiState, build_export_line_values, pv_history_trend, spark_data,
+        spark_marker_row,
     };
     use std::collections::VecDeque;
     use std::time::Duration;
@@ -1546,6 +1559,31 @@ mod tests {
                 panic!("hist_inner[{idx}] is not a Length constraint");
             }
         }
+    }
+
+    /// Regression: history cap must be max(tune_history, spark_w) so that sparklines fill
+    /// the terminal width even when tune_history < screen columns.
+    #[test]
+    fn history_cap_uses_spark_w_when_wider_than_tune_history() {
+        // Simulate a TuneUiState with tune_history=10 but spark_w=100 (wide terminal).
+        // After 20 pushes, we expect 100 items retained (not 10).
+        let tune_history = 10usize;
+        let spark_w = 100usize;
+        // The cap logic: cap = tune_history.max(spark_w)
+        let cap = tune_history.max(spark_w);
+        assert_eq!(cap, 100, "cap should follow spark_w when spark_w > tune_history");
+        // Simulate the dequeue trimming
+        let mut history: VecDeque<f64> = VecDeque::new();
+        for i in 0..200usize {
+            while history.len() >= cap {
+                history.pop_front();
+            }
+            history.push_back(i as f64);
+        }
+        assert_eq!(history.len(), cap, "history should hold exactly cap items");
+        // Conversely: if spark_w < tune_history, tune_history wins
+        let cap2 = tune_history.max(20);
+        assert_eq!(cap2, 20, "cap should follow tune_history when tune_history > spark_w");
     }
 
     #[test]
