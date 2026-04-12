@@ -1112,6 +1112,7 @@ dependencies = [
  "crossterm",
  "ctrlc",
  "fs2",
+ "nix 0.31.2",
  "pid-ctl-core",
  "portable-pty",
  "predicates",

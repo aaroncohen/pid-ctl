@@ -10,6 +10,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
+use nix::sys::signal::{Signal, kill};
+#[cfg(unix)]
+use nix::unistd::Pid;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 /// Wait for `child` to exit or until `dur` elapses.
@@ -202,20 +206,19 @@ fn join_stdout_reader(handle: thread::JoinHandle<io::Result<String>>) -> io::Res
 /// Best-effort: terminate the whole process group (Unix) so `sh -c` children
 /// cannot outlive the timeout, then always [`Child::kill`] the direct child.
 ///
-/// Spawning `kill` from `PATH` alone can fail on some CI images; `Child::kill`
-/// is required so we never fall through to a blocking [`Child::wait`] while the
-/// shell is still running `sleep` (that produced full-sleep durations on Linux CI).
+/// Uses `kill(2)` via `nix` so we do not depend on a `kill` binary on `PATH`.
+/// Without killing the whole group, `sleep` can outlive the shell from the
+/// parent’s perspective; the stdout reader thread then blocks until `sleep`
+/// finishes (full-sleep durations on Linux CI).
 #[cfg_attr(unix, allow(clippy::needless_pass_by_ref_mut))] // Unix only needs `Child::id` (`&self`); non-Unix needs `&mut` for `kill`.
 fn kill_child_process_tree(child: &mut Child) {
     #[cfg(unix)]
     {
-        let pid = child.id();
-        let _ = Command::new("/bin/kill")
-            .args(["-9", &format!("-{pid}")])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let pid = child.id().cast_signed();
+        if pid > 0 {
+            // Process group id matches the shell pid when spawned with `process_group(0)`.
+            let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+        }
         let _ = child.kill();
     }
     #[cfg(not(unix))]
