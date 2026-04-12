@@ -210,7 +210,7 @@ impl SocketListener {
     where
         F: FnOnce(Request) -> Response,
     {
-        let (stream, _addr) = match self.listener.accept() {
+        let (mut stream, _addr) = match self.listener.accept() {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
             Err(e) => return Err(SocketError::Io(e)),
             Ok(pair) => pair,
@@ -226,6 +226,12 @@ impl SocketListener {
             .map_err(SocketError::Io)?;
 
         if bytes_read as u64 > MAX_REQUEST_BYTES {
+            // `take` stops after MAX_REQUEST_BYTES+1 bytes; any further bytes the peer
+            // sent remain in the socket buffer. On Linux, closing the stream with
+            // unread inbound data can RST the connection, so the client sees
+            // ConnectionReset instead of the error JSON — drain before writing.
+            let mut drain = Vec::new();
+            let _ = stream.read_to_end(&mut drain);
             let _ = write_response(
                 &stream,
                 &Response::Ack {
