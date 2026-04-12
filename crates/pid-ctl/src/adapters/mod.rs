@@ -200,20 +200,32 @@ fn join_stdout_reader(handle: thread::JoinHandle<io::Result<String>>) -> io::Res
 }
 
 /// Best-effort: terminate the whole process group (Unix) so `sh -c` children
-/// cannot outlive the timeout. Falls back to [`Child::kill`] on other targets.
+/// cannot outlive the timeout, then always [`Child::kill`] the direct child.
+///
+/// Spawning `kill` from `PATH` alone can fail on some CI images; `Child::kill`
+/// is required so we never fall through to a blocking [`Child::wait`] while the
+/// shell is still running `sleep` (that produced full-sleep durations on Linux CI).
 #[cfg_attr(unix, allow(clippy::needless_pass_by_ref_mut))] // Unix only needs `Child::id` (`&self`); non-Unix needs `&mut` for `kill`.
 fn kill_child_process_tree(child: &mut Child) {
     #[cfg(unix)]
     {
         let pid = child.id();
-        let _ = Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
+        let _ = Command::new("/bin/kill")
+            .args(["-9", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
+        let _ = child.kill();
     }
     #[cfg(not(unix))]
     {
         let _ = child.kill();
     }
+}
+
+fn reap_child_after_kill(child: &mut Child) {
+    let _ = wait_child_deadline(child, Duration::from_secs(2));
 }
 
 impl PvSource for CmdPvSource {
@@ -245,7 +257,7 @@ impl PvSource for CmdPvSource {
             (status, output)
         } else {
             kill_child_process_tree(&mut child);
-            let _ = child.wait();
+            reap_child_after_kill(&mut child);
             let _ = join_stdout_reader(reader);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -450,7 +462,7 @@ impl CvSink for CmdCvSink {
             }
         } else {
             kill_child_process_tree(&mut child);
-            let _ = child.wait();
+            reap_child_after_kill(&mut child);
             let mut err_text = String::new();
             if let Some(mut s) = stderr_pipe {
                 let _ = Read::read_to_string(&mut s, &mut err_text);
