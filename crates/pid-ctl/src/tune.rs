@@ -1082,10 +1082,80 @@ fn history_range(history: &VecDeque<f64>) -> Option<(f64, f64)> {
     Some(expand_scale(lo, hi, mean))
 }
 
-/// Symmetric half-span of the PV scale, derived from the last `n` items of history.
-/// The half-span is the maximum absolute deviation of any PV sample from `setpoint`,
-/// so the setpoint always sits at the exact vertical midpoint of the bar area.
-/// A minimum span is enforced so a constant series still produces visible bars.
+/// Compute tick positions for the right-edge scale ruler on the PV canvas.
+///
+/// Returns `(y_value, symbol)` pairs for each tick that falls within `[y_lo, y_hi]`.
+/// The step size is chosen to produce ~6–10 ticks; the symbol encodes magnitude:
+///
+/// | Symbol | Meaning                          |
+/// |--------|----------------------------------|
+/// | `·`    | sub-step (×0.1 of base step)     |
+/// | `╴`    | half-step (×0.5 of base step)    |
+/// | `┤`    | base step (×1)                   |
+/// | `╡`    | major step (×5 of base step)     |
+/// | `╣`    | decade step (×10 of base step)   |
+fn scale_ticks(y_lo: f64, y_hi: f64) -> Vec<(f64, &'static str)> {
+    let span = y_hi - y_lo;
+    if span <= 0.0 {
+        return vec![];
+    }
+    // Choose a "nice" base step: largest power-of-10 factor such that span/step >= 6.
+    let rough = span / 8.0;
+    let mag = rough.log10().floor();
+    let base = 10_f64.powf(mag);
+    // Refine to the smallest of [1, 2, 5] × base that still gives ≥ 6 ticks.
+    let step = [1.0, 2.0, 5.0]
+        .iter()
+        .map(|&m| m * base)
+        .find(|&s| span / s >= 5.0)
+        .unwrap_or(base);
+
+    // Enumerate all multiples of step/10 (sub-steps) within the range.
+    // `first`/`last` are already integers (ceil/floor of y/sub) — casting to i64 is safe
+    // because the guard `count <= 500` keeps values well within i64 range.
+    let sub = step / 10.0;
+    let first = (y_lo / sub).ceil();
+    let last = (y_hi / sub).floor();
+    #[allow(clippy::cast_possible_truncation)]
+    let count = ((last - first) as i64).saturating_add(1);
+    if count <= 0 || count > 500 {
+        return vec![];
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let mut ticks = Vec::with_capacity(count as usize);
+    #[allow(clippy::cast_possible_truncation)]
+    let mut k = first as i64;
+    #[allow(clippy::cast_possible_truncation)]
+    while k <= last as i64 {
+        #[allow(clippy::cast_precision_loss)]
+        let y = k as f64 * sub;
+        // Classify by which step multiple y is closest to.
+        let sym = if is_multiple(y, step * 10.0) {
+            "╣"
+        } else if is_multiple(y, step * 5.0) {
+            "╡"
+        } else if is_multiple(y, step) {
+            "┤"
+        } else if is_multiple(y, step * 0.5) {
+            "╴"
+        } else {
+            "·"
+        };
+        ticks.push((y, sym));
+        k += 1;
+    }
+    ticks
+}
+
+/// Returns true when `value` is an integer multiple of `step` within floating-point tolerance.
+fn is_multiple(value: f64, step: f64) -> bool {
+    if step <= 0.0 {
+        return false;
+    }
+    (value / step).fract().abs() < 1e-6
+}
+
 fn spark_data(values: &VecDeque<f64>) -> Vec<u64> {
     if values.is_empty() {
         return vec![];
@@ -1685,7 +1755,12 @@ fn render_frame(
 
     // Canvas overlay: PV (blue) and SP (white) plotted on the same coordinate space.
     // X = column index (oldest=0, newest=right), Y = actual engineering value.
-    let (y_lo, y_hi) = pv_scale.unwrap_or((cfg.setpoint - 1.0, cfg.setpoint + 1.0));
+    // Enforce minimum zoom of ±1% of |setpoint| so the graph never collapses to a dot.
+    let sp_min_half = (0.01 * cfg.setpoint.abs()).max(1e-6);
+    let (raw_y_lo, raw_y_hi) =
+        pv_scale.unwrap_or((cfg.setpoint - sp_min_half, cfg.setpoint + sp_min_half));
+    let y_lo = raw_y_lo.min(cfg.setpoint - sp_min_half);
+    let y_hi = raw_y_hi.max(cfg.setpoint + sp_min_half);
     let pv_start = ui.pv_history.len().saturating_sub(spark_w);
     let sp_start = ui.sp_history.len().saturating_sub(spark_w);
     #[allow(clippy::cast_precision_loss)]
@@ -1706,6 +1781,7 @@ fn render_frame(
         .collect();
     #[allow(clippy::cast_precision_loss)]
     let x_max = (spark_w as f64 - 1.0).max(1.0);
+    let ticks = scale_ticks(y_lo, y_hi);
     f.render_widget(
         Canvas::default()
             .block(Block::default().title(pv_title))
@@ -1722,6 +1798,15 @@ fn render_frame(
                     coords: &sp_coords,
                     color: Color::White,
                 });
+                ctx.layer();
+                // Scale ruler: draw tick characters on the far-right column.
+                for (y, sym) in &ticks {
+                    ctx.print(
+                        x_max,
+                        *y,
+                        ratatui::text::Span::styled(*sym, Style::default().fg(Color::DarkGray)),
+                    );
+                }
             }),
         hist_inner[1],
     );
@@ -2192,6 +2277,49 @@ mod tests {
             .collect();
         // 99.0 is excluded; indices restart from 0
         assert_eq!(coords, vec![(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)]);
+    }
+
+    #[test]
+    fn scale_ticks_base_step_symbol_is_bracket() {
+        use super::scale_ticks;
+        // span ~10, base step should be 1.0 → ┤ at integers
+        let ticks = scale_ticks(0.0, 10.0);
+        let integer_syms: Vec<_> = ticks
+            .iter()
+            .filter(|(y, _)| (y.fract()).abs() < 1e-9 && *y > 0.0 && *y < 10.0)
+            .map(|(_, s)| *s)
+            .collect();
+        // Every whole number in (0,10) should be ┤, ╡, or ╣
+        assert!(
+            integer_syms
+                .iter()
+                .all(|&s| s == "┤" || s == "╡" || s == "╣"),
+            "integer ticks should be ┤/╡/╣, got {integer_syms:?}"
+        );
+    }
+
+    #[test]
+    fn scale_ticks_decade_is_heaviest() {
+        use super::scale_ticks;
+        // span 100: base step=10, so multiples of 100 get ╣, multiples of 50 get ╡, etc.
+        let ticks = scale_ticks(0.0, 100.0);
+        let at_100 = ticks.iter().find(|(y, _)| (*y - 100.0).abs() < 1e-6);
+        assert_eq!(at_100.map(|(_, s)| *s), Some("╣"));
+    }
+
+    #[test]
+    fn scale_ticks_empty_on_zero_span() {
+        use super::scale_ticks;
+        assert!(scale_ticks(5.0, 5.0).is_empty());
+    }
+
+    #[test]
+    fn is_multiple_basic() {
+        use super::is_multiple;
+        assert!(is_multiple(10.0, 5.0));
+        assert!(is_multiple(0.0, 1.0));
+        assert!(!is_multiple(3.0, 5.0));
+        assert!(is_multiple(0.5, 0.1));
     }
 
     #[test]
