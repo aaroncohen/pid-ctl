@@ -24,7 +24,9 @@ use pid_ctl::schedule::next_deadline_after_tick;
 use pid_ctl_core::PidConfig;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
+use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
+use ratatui::widgets::canvas::{Canvas, Points};
 use ratatui::widgets::{Block, Borders, Paragraph, Sparkline, Wrap};
 use ratatui::{Frame, Terminal};
 use std::collections::VecDeque;
@@ -114,7 +116,8 @@ struct TuneUiState {
     last_record: Option<app::IterationRecord>,
     pv_history: VecDeque<f64>,
     cv_history: VecDeque<f64>,
-    /// Parallel to PV/CV history — tick id for sparkline column mapping.
+    sp_history: VecDeque<f64>,
+    /// Parallel to PV/CV/SP history — tick id for sparkline column mapping.
     serial_history: VecDeque<u64>,
     tick_serial: u64,
     annotations: VecDeque<GainAnnotation>,
@@ -149,6 +152,7 @@ impl TuneUiState {
             last_record: None,
             pv_history: VecDeque::new(),
             cv_history: VecDeque::new(),
+            sp_history: VecDeque::new(),
             serial_history: VecDeque::new(),
             tick_serial: 0,
             annotations: VecDeque::new(),
@@ -164,17 +168,19 @@ impl TuneUiState {
         }
     }
 
-    fn push_history(&mut self, args: &LoopArgs, pv: f64, cv: f64) {
+    fn push_history(&mut self, args: &LoopArgs, pv: f64, cv: f64, sp: f64) {
         // Keep enough history to fill the terminal width even when tune_history < spark_w.
         let cap = args.tune_history.max(self.spark_w);
         while self.pv_history.len() >= cap {
             self.pv_history.pop_front();
             self.cv_history.pop_front();
+            self.sp_history.pop_front();
             self.serial_history.pop_front();
         }
         self.tick_serial = self.tick_serial.saturating_add(1);
         self.pv_history.push_back(pv);
         self.cv_history.push_back(cv);
+        self.sp_history.push_back(sp);
         self.serial_history.push_back(self.tick_serial);
         while self.annotations.len() > cap {
             self.annotations.pop_front();
@@ -498,7 +504,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                 if let Ok(sz) = terminal.size() {
                     ui.spark_w = sz.width.saturating_sub(4) as usize;
                 }
-                ui.push_history(&args, scaled_pv, held);
+                ui.push_history(&args, scaled_pv, held, session.config().setpoint);
             } else {
                 let mut dry = DryRunCvSink;
                 let active: &mut dyn CvSink = if ui.dry_run {
@@ -527,7 +533,12 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                         if let Ok(sz) = terminal.size() {
                             ui.spark_w = sz.width.saturating_sub(4) as usize;
                         }
-                        ui.push_history(&args, outcome.record.pv, outcome.record.cv);
+                        ui.push_history(
+                            &args,
+                            outcome.record.pv,
+                            outcome.record.cv,
+                            session.config().setpoint,
+                        );
                     }
                     Ok(None) => {}
                     Err(e) => return Err(e),
@@ -1071,6 +1082,10 @@ fn history_range(history: &VecDeque<f64>) -> Option<(f64, f64)> {
     Some(expand_scale(lo, hi, mean))
 }
 
+/// Symmetric half-span of the PV scale, derived from the last `n` items of history.
+/// The half-span is the maximum absolute deviation of any PV sample from `setpoint`,
+/// so the setpoint always sits at the exact vertical midpoint of the bar area.
+/// A minimum span is enforced so a constant series still produces visible bars.
 fn spark_data(values: &VecDeque<f64>) -> Vec<u64> {
     if values.is_empty() {
         return vec![];
@@ -1482,9 +1497,37 @@ fn render_frame(
         .split(chunks[1]);
 
     let spark_w = body_chunks[2].width.saturating_sub(4) as usize;
-    let pv_spark_full = spark_data(&ui.pv_history);
+    // Canvas plots PV (blue) and SP (white) on the same coordinate space.
+    // Y scale covers PV ∪ SP from the last 1.5× window to dampen jarring rescales.
+    let pv_scale_n = (spark_w * 3 / 2).max(1);
+    let pv_scale = {
+        let skip = ui.pv_history.len().saturating_sub(pv_scale_n);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        let mut sum = 0.0f64;
+        let mut count = 0usize;
+        for &v in ui
+            .pv_history
+            .iter()
+            .skip(skip)
+            .chain(ui.sp_history.iter().skip(skip))
+        {
+            if v.is_finite() {
+                lo = lo.min(v);
+                hi = hi.max(v);
+                sum += v;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let mean = sum / count as f64;
+            Some(expand_scale(lo, hi, mean))
+        } else {
+            None
+        }
+    };
     let cv_spark_full = spark_data(&ui.cv_history);
-    let pv_spark = spark_tail_slice(&pv_spark_full, spark_w);
     let cv_spark = spark_tail_slice(&cv_spark_full, spark_w);
 
     let serial_vec: Vec<u64> = ui.serial_history.iter().copied().collect();
@@ -1631,50 +1674,57 @@ fn render_frame(
 
     f.render_widget(Paragraph::new(hist_title), hist_inner[0]);
 
-    let pv_scale = history_range(&ui.pv_history);
     let pv_trend = history_trend(&ui.pv_history);
     let pv_range_str = pv_scale
         .map(|(lo, hi)| format!("  [{lo:.2} – {hi:.2}]"))
         .unwrap_or_default();
-    let pv_title = format!("PV {pv_trend} {pv_val:.2}{pv_range_str}");
-    let spark_pv = Sparkline::default()
-        .data(&pv_spark)
-        .style(Style::default().fg(Color::LightBlue));
-    f.render_widget(
-        spark_pv.block(Block::default().title(pv_title)),
-        hist_inner[1],
+    let pv_title = format!(
+        "PV {pv_trend} {pv_val:.2}  SP {:.2}{pv_range_str}",
+        cfg.setpoint
     );
 
-    // Setpoint indicator — white dash just past the last bar on the PV sparkline.
-    // hist_inner[1].height includes the block title row, so bar rows = height - 1.
-    // We position the indicator within the bar area only (y+1 .. y+height-1) to
-    // avoid overwriting the "PV ▼ …" title on the first row.
-    if let Some((pv_lo, pv_hi)) = pv_scale {
-        let pv_span = pv_hi - pv_lo;
-        let bar_rows = hist_inner[1].height.saturating_sub(1);
-        if pv_span > 1e-12 && bar_rows > 0 {
-            let sp_pct = ((cfg.setpoint - pv_lo) / pv_span * 100.0).clamp(0.0, 100.0);
-            let num_bar_rows = f64::from(bar_rows);
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let row_offset = ((1.0 - sp_pct / 100.0) * num_bar_rows)
-                .floor()
-                .clamp(0.0, num_bar_rows - 1.0) as u16;
-            let sp_y = hist_inner[1].y + 1 + row_offset; // +1 skips the block title row
-            #[allow(clippy::cast_possible_truncation)]
-            let ind_x = hist_inner[1].x + pv_spark.len() as u16;
-            if ind_x + 2 <= hist_inner[1].right() {
-                f.render_widget(
-                    Paragraph::new("──").style(Style::default().fg(Color::White)),
-                    Rect {
-                        x: ind_x,
-                        y: sp_y,
-                        width: 2,
-                        height: 1,
-                    },
-                );
-            }
-        }
-    }
+    // Canvas overlay: PV (blue) and SP (white) plotted on the same coordinate space.
+    // X = column index (oldest=0, newest=right), Y = actual engineering value.
+    let (y_lo, y_hi) = pv_scale.unwrap_or((cfg.setpoint - 1.0, cfg.setpoint + 1.0));
+    let pv_start = ui.pv_history.len().saturating_sub(spark_w);
+    let sp_start = ui.sp_history.len().saturating_sub(spark_w);
+    #[allow(clippy::cast_precision_loss)]
+    let pv_coords: Vec<(f64, f64)> = ui
+        .pv_history
+        .iter()
+        .skip(pv_start)
+        .enumerate()
+        .filter_map(|(i, &v)| v.is_finite().then_some((i as f64, v)))
+        .collect();
+    #[allow(clippy::cast_precision_loss)]
+    let sp_coords: Vec<(f64, f64)> = ui
+        .sp_history
+        .iter()
+        .skip(sp_start)
+        .enumerate()
+        .filter_map(|(i, &v)| v.is_finite().then_some((i as f64, v)))
+        .collect();
+    #[allow(clippy::cast_precision_loss)]
+    let x_max = (spark_w as f64 - 1.0).max(1.0);
+    f.render_widget(
+        Canvas::default()
+            .block(Block::default().title(pv_title))
+            .marker(Marker::Braille)
+            .x_bounds([0.0, x_max])
+            .y_bounds([y_lo, y_hi])
+            .paint(move |ctx| {
+                ctx.draw(&Points {
+                    coords: &pv_coords,
+                    color: Color::LightBlue,
+                });
+                ctx.layer();
+                ctx.draw(&Points {
+                    coords: &sp_coords,
+                    color: Color::White,
+                });
+            }),
+        hist_inner[1],
+    );
 
     f.render_widget(
         Paragraph::new(marker_row.clone()).style(Style::default().fg(Color::White)),
@@ -2112,6 +2162,39 @@ mod tests {
     }
 
     #[test]
+    fn pv_canvas_coords_oldest_left_newest_right() {
+        // X index 0 = oldest, last index = newest (left-to-right time order).
+        let d: Vec<f64> = vec![1.0, 2.0, 3.0];
+        let spark_w = 3usize;
+        let start = d.len().saturating_sub(spark_w);
+        #[allow(clippy::cast_precision_loss)]
+        let coords: Vec<(f64, f64)> = d
+            .iter()
+            .skip(start)
+            .enumerate()
+            .filter_map(|(i, &v)| v.is_finite().then_some((i as f64, v)))
+            .collect();
+        assert_eq!(coords, vec![(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)]);
+    }
+
+    #[test]
+    fn pv_canvas_coords_truncate_to_window() {
+        // When history is longer than spark_w, only the last spark_w items appear.
+        let d: Vec<f64> = vec![99.0, 1.0, 2.0, 3.0]; // 4 items, window=3
+        let spark_w = 3usize;
+        let start = d.len().saturating_sub(spark_w);
+        #[allow(clippy::cast_precision_loss)]
+        let coords: Vec<(f64, f64)> = d
+            .iter()
+            .skip(start)
+            .enumerate()
+            .filter_map(|(i, &v)| v.is_finite().then_some((i as f64, v)))
+            .collect();
+        // 99.0 is excluded; indices restart from 0
+        assert_eq!(coords, vec![(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)]);
+    }
+
+    #[test]
     fn export_dedupes_tunables_and_strips_tune_flags() {
         let argv = vec![
             "pid-ctl".into(),
@@ -2209,12 +2292,14 @@ mod tests {
     fn make_test_ui_state(_args: &super::LoopArgs, terminal_width: u16) -> super::TuneUiState {
         let mut pv_history = VecDeque::new();
         let mut cv_history = VecDeque::new();
+        let mut sp_history = VecDeque::new();
         let mut serial_history = VecDeque::new();
         #[allow(clippy::cast_precision_loss)]
         for i in 0..60u64 {
             let t = i as f64 * 0.3;
             pv_history.push_back(53.0 + t.sin() * 3.0);
             cv_history.push_back(35.0 + i as f64 * 0.3);
+            sp_history.push_back(55.0);
             serial_history.push_back(i + 1);
         }
         super::TuneUiState {
@@ -2243,6 +2328,7 @@ mod tests {
             }),
             pv_history,
             cv_history,
+            sp_history,
             serial_history,
             tick_serial: 60,
             annotations: VecDeque::new(),
