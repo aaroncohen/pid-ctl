@@ -1085,75 +1085,95 @@ fn history_range(history: &VecDeque<f64>) -> Option<(f64, f64)> {
 /// Compute tick positions for the right-edge scale ruler on the PV canvas.
 ///
 /// Returns `(y_value, symbol)` pairs for each tick that falls within `[y_lo, y_hi]`.
-/// The step size is chosen to produce ~6–10 ticks; the symbol encodes magnitude:
 ///
-/// | Symbol | Meaning                          |
-/// |--------|----------------------------------|
-/// | `·`    | sub-step (×0.1 of base step)     |
-/// | `╴`    | half-step (×0.5 of base step)    |
-/// | `┤`    | base step (×1)                   |
-/// | `╡`    | major step (×5 of base step)     |
-/// | `╣`    | decade step (×10 of base step)   |
-fn scale_ticks(y_lo: f64, y_hi: f64) -> Vec<(f64, &'static str)> {
+/// ## Stability guarantee
+///
+/// `sub = base_unit / 10` is fixed to the setpoint's natural scale — it never
+/// changes with zoom.  Ticks are classified by `k_rel = k − k_sp` (integer offset
+/// from setpoint), so a given world Y always maps to the same character regardless
+/// of the current zoom level.  As zoom changes, ticks only appear or disappear at
+/// the boundary of the visible range; they never change character.
+///
+/// | Symbol | Distance from setpoint      |
+/// |--------|-----------------------------|
+/// | `╣`    | 0 (setpoint itself) or ×10          |
+/// | `╡`    | ×5 × `base_unit`                    |
+/// | `┤`    | ×1 × `base_unit`                    |
+/// | `╴`    | ×0.5 × `base_unit`                  |
+/// | `·`    | ×0.1 × `base_unit` (sub-step)       |
+///
+/// `base_unit = 10^(floor(log10(|SP|)) - 1)`:
+///   `SP=60` → `base_unit=1`,  `SP=600` → `base_unit=10`,  `SP=6` → `base_unit=0.1`
+fn scale_ticks(y_lo: f64, y_hi: f64, setpoint: f64, canvas_rows: u16) -> Vec<(f64, &'static str)> {
     let span = y_hi - y_lo;
     if span <= 0.0 {
         return vec![];
     }
-    // Choose a "nice" base step: largest power-of-10 factor such that span/step >= 6.
-    let rough = span / 8.0;
-    let mag = rough.log10().floor();
-    let base = 10_f64.powf(mag);
-    // Refine to the smallest of [1, 2, 5] × base that still gives ≥ 6 ticks.
-    let step = [1.0, 2.0, 5.0]
-        .iter()
-        .map(|&m| m * base)
-        .find(|&s| span / s >= 5.0)
-        .unwrap_or(base);
 
-    // Enumerate all multiples of step/10 (sub-steps) within the range.
-    // `first`/`last` are already integers (ceil/floor of y/sub) — casting to i64 is safe
-    // because the guard `count <= 500` keeps values well within i64 range.
-    let sub = step / 10.0;
-    let first = (y_lo / sub).ceil();
-    let last = (y_hi / sub).floor();
+    // Natural scale unit for this setpoint magnitude.
+    let sp_abs = setpoint.abs().max(1e-9);
+    let base_unit = 10_f64.powf(sp_abs.log10().floor() - 1.0);
+    // Finest sub-step — FIXED for a given SP, independent of current zoom.
+    let sub = base_unit / 10.0;
+
+    // Integer index of setpoint on the sub-step grid.  `.round()` absorbs floating-
+    // point error in setpoint/sub (error << 0.5 for any reasonable SP).
     #[allow(clippy::cast_possible_truncation)]
-    let count = ((last - first) as i64).saturating_add(1);
-    if count <= 0 || count > 500 {
+    let k_sp = (setpoint / sub).round() as i64;
+
+    // Number of sub-steps visible in the current range.
+    #[allow(clippy::cast_possible_truncation)]
+    let sub_count = (span / sub).round() as i64;
+
+    // Stride through sub-steps so at most `canvas_rows` ticks are emitted.
+    // With this limit, consecutive ticks are guaranteed to be at least 1 row
+    // apart: tick_spacing = stride × sub, row_height = span / canvas_rows,
+    // so ticks_per_row = row_height / tick_spacing = sub_count / (stride × canvas_rows) ≤ 1.
+    // Stride from {1,5,10,50,…} so each zoom level naturally hides finer ticks.
+    #[allow(clippy::items_after_statements)]
+    const STRIDES: &[i64] = &[1, 5, 10, 50, 100, 500, 1_000, 5_000, 10_000];
+    let max_ticks = i64::from(canvas_rows.max(1));
+    let stride = STRIDES
+        .iter()
+        .copied()
+        .find(|&s| sub_count / s <= max_ticks)
+        .unwrap_or(10_000);
+
+    // First k ≥ ceil(y_lo/sub) that sits on a stride boundary relative to k_sp.
+    #[allow(clippy::cast_possible_truncation)]
+    let first_k_raw = (y_lo / sub).ceil() as i64;
+    let offset = (first_k_raw - k_sp).rem_euclid(stride);
+    let first_k = first_k_raw + if offset == 0 { 0 } else { stride - offset };
+    #[allow(clippy::cast_possible_truncation)]
+    let last_k = (y_hi / sub).floor() as i64;
+
+    if first_k > last_k {
         return vec![];
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let mut ticks = Vec::with_capacity(count as usize);
-    #[allow(clippy::cast_possible_truncation)]
-    let mut k = first as i64;
-    #[allow(clippy::cast_possible_truncation)]
-    while k <= last as i64 {
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let capacity = ((last_k - first_k) / stride + 1) as usize;
+    let mut ticks = Vec::with_capacity(capacity);
+    let mut k = first_k;
+    while k <= last_k {
         #[allow(clippy::cast_precision_loss)]
         let y = k as f64 * sub;
-        // Classify by which step multiple y is closest to.
-        let sym = if is_multiple(y, step * 10.0) {
-            "╣"
-        } else if is_multiple(y, step * 5.0) {
-            "╡"
-        } else if is_multiple(y, step) {
-            "┤"
-        } else if is_multiple(y, step * 0.5) {
-            "╴"
+        let k_rel = k - k_sp;
+        let sym = if k_rel % 100 == 0 {
+            "╣" // setpoint, or ±10 × base_unit
+        } else if k_rel % 50 == 0 {
+            "╡" // ±5 × base_unit
+        } else if k_rel % 10 == 0 {
+            "┤" // ±1 × base_unit
+        } else if k_rel % 5 == 0 {
+            "╴" // ±0.5 × base_unit
         } else {
-            "·"
+            "·" // ±0.1 × base_unit (sub-step)
         };
         ticks.push((y, sym));
-        k += 1;
+        k += stride;
     }
     ticks
-}
-
-/// Returns true when `value` is an integer multiple of `step` within floating-point tolerance.
-fn is_multiple(value: f64, step: f64) -> bool {
-    if step <= 0.0 {
-        return false;
-    }
-    (value / step).fract().abs() < 1e-6
 }
 
 fn spark_data(values: &VecDeque<f64>) -> Vec<u64> {
@@ -1567,7 +1587,7 @@ fn render_frame(
         .split(chunks[1]);
 
     let spark_w = body_chunks[2].width.saturating_sub(4) as usize;
-    // Canvas plots PV (blue) and SP (white) on the same coordinate space.
+    // Canvas plots PV (cyan) and SP (yellow) on the same coordinate space.
     // Y scale covers PV ∪ SP from the last 1.5× window to dampen jarring rescales.
     let pv_scale_n = (spark_w * 3 / 2).max(1);
     let pv_scale = {
@@ -1753,7 +1773,7 @@ fn render_frame(
         cfg.setpoint
     );
 
-    // Canvas overlay: PV (blue) and SP (white) plotted on the same coordinate space.
+    // Canvas overlay: PV (cyan) and SP (yellow) plotted on the same coordinate space.
     // X = column index (oldest=0, newest=right), Y = actual engineering value.
     // Enforce minimum zoom of ±1% of |setpoint| so the graph never collapses to a dot.
     let sp_min_half = (0.01 * cfg.setpoint.abs()).max(1e-6);
@@ -1781,7 +1801,7 @@ fn render_frame(
         .collect();
     #[allow(clippy::cast_precision_loss)]
     let x_max = (spark_w as f64 - 1.0).max(1.0);
-    let ticks = scale_ticks(y_lo, y_hi);
+    let ticks = scale_ticks(y_lo, y_hi, cfg.setpoint, hist_inner[1].height);
     f.render_widget(
         Canvas::default()
             .block(Block::default().title(pv_title))
@@ -1791,12 +1811,12 @@ fn render_frame(
             .paint(move |ctx| {
                 ctx.draw(&Points {
                     coords: &pv_coords,
-                    color: Color::LightBlue,
+                    color: Color::LightCyan,
                 });
                 ctx.layer();
                 ctx.draw(&Points {
                     coords: &sp_coords,
-                    color: Color::White,
+                    color: Color::LightYellow,
                 });
                 ctx.layer();
                 // Scale ruler: draw tick characters on the far-right column.
@@ -2280,46 +2300,71 @@ mod tests {
     }
 
     #[test]
-    fn scale_ticks_base_step_symbol_is_bracket() {
+    fn scale_ticks_multiples_of_step_are_brackets() {
         use super::scale_ticks;
-        // span ~10, base step should be 1.0 → ┤ at integers
-        let ticks = scale_ticks(0.0, 10.0);
-        let integer_syms: Vec<_> = ticks
-            .iter()
-            .filter(|(y, _)| (y.fract()).abs() < 1e-9 && *y > 0.0 && *y < 10.0)
-            .map(|(_, s)| *s)
-            .collect();
-        // Every whole number in (0,10) should be ┤, ╡, or ╣
-        assert!(
-            integer_syms
-                .iter()
-                .all(|&s| s == "┤" || s == "╡" || s == "╣"),
-            "integer ticks should be ┤/╡/╣, got {integer_syms:?}"
-        );
+        // span=0-7: rough=0.875, step=1.0 (first nice number >= 0.875), sub=0.1
+        // Multiples of step=1.0 → k%10==0 → ┤/╡/╣.  Non-multiples → · or ╴.
+        let ticks = scale_ticks(0.0, 7.0, 50.0, 100);
+        // k=10 → y=1.0, k=20 → y=2.0 ... all should be heavy ticks
+        for &(y, sym) in &ticks {
+            let is_integer = (y.round() - y).abs() < 1e-9;
+            if is_integer && y > 0.0 {
+                assert!(
+                    sym == "┤" || sym == "╡" || sym == "╣",
+                    "y={y} is a multiple of step, expected ┤/╡/╣ got {sym}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn scale_ticks_decade_is_heaviest() {
+    fn scale_ticks_k_modulo_classification_correct() {
         use super::scale_ticks;
-        // span 100: base step=10, so multiples of 100 get ╣, multiples of 50 get ╡, etc.
-        let ticks = scale_ticks(0.0, 100.0);
-        let at_100 = ticks.iter().find(|(y, _)| (*y - 100.0).abs() < 1e-6);
-        assert_eq!(at_100.map(|(_, s)| *s), Some("╣"));
+        // span=0-5: rough=5/8=0.625, step=1.0 (first nice >= 0.625), sub=0.1.
+        // k=50 → y=5.0 → k%50==0 → ╡; k=100 → y=10 (out of range).
+        let ticks = scale_ticks(0.0, 5.0, 50.0, 100);
+        let at_5 = ticks.iter().find(|(y, _)| (*y - 5.0).abs() < 1e-9);
+        // y=5.0 is k=50 → ╡ (major ×5)
+        assert_eq!(at_5.map(|(_, s)| *s), Some("╡"), "y=5 should be ╡");
+        let at_1 = ticks.iter().find(|(y, _)| (*y - 1.0).abs() < 1e-9);
+        // y=1.0 is k=10 → ┤ (base step)
+        assert_eq!(at_1.map(|(_, s)| *s), Some("┤"), "y=1 should be ┤");
     }
 
     #[test]
     fn scale_ticks_empty_on_zero_span() {
         use super::scale_ticks;
-        assert!(scale_ticks(5.0, 5.0).is_empty());
+        assert!(scale_ticks(5.0, 5.0, 50.0, 20).is_empty());
     }
 
     #[test]
-    fn is_multiple_basic() {
-        use super::is_multiple;
-        assert!(is_multiple(10.0, 5.0));
-        assert!(is_multiple(0.0, 1.0));
-        assert!(!is_multiple(3.0, 5.0));
-        assert!(is_multiple(0.5, 0.1));
+    fn scale_ticks_base_steps_are_consistent_at_fractional_values() {
+        use super::scale_ticks;
+        // Regression: span centered on 60.0 with ±0.3 range (like SP=60, 1% zoom).
+        // Every base-step tick must be ┤, ╡, or ╣ — never · or ╴.
+        let ticks = scale_ticks(59.7, 60.3, 60.0, 100);
+        // Find the base step used: the gap between consecutive ┤ ticks.
+        let bracket_ys: Vec<f64> = ticks
+            .iter()
+            .filter(|(_, s)| *s == "┤" || *s == "╡" || *s == "╣")
+            .map(|(y, _)| *y)
+            .collect();
+        assert!(
+            !bracket_ys.is_empty(),
+            "expected at least one base-step tick"
+        );
+        // None of the non-heavy ticks should land at the same Y as a heavy tick.
+        let dot_ys: Vec<f64> = ticks
+            .iter()
+            .filter(|(_, s)| *s == "·" || *s == "╴")
+            .map(|(y, _)| *y)
+            .collect();
+        for &dy in &dot_ys {
+            assert!(
+                bracket_ys.iter().all(|&by| (by - dy).abs() > 1e-9),
+                "dot tick at {dy} collides with a base-step tick"
+            );
+        }
     }
 
     #[test]
@@ -2569,5 +2614,505 @@ mod tests {
             text.contains("HISTORY"),
             "HISTORY missing at 200×30:\n{text}"
         );
+    }
+
+    // ── Scale ruler stability tests ────────────────────────────────────────────
+
+    /// Maps a world-space `y` value to a 0-based character row, matching the
+    /// exact formula ratatui's Canvas uses for label placement (see
+    /// `ratatui-widgets` canvas.rs, "Finally draw the labels"):
+    ///
+    /// ```text
+    /// y_row = (top - label.y) * (canvas_height - 1) / (top - bottom)  as u16
+    /// ```
+    ///
+    /// Returns `None` for points outside `[y_lo, y_hi]` (filtered by ratatui
+    /// before the math runs).
+    fn y_to_char_row(y: f64, y_lo: f64, y_hi: f64, height: u16) -> Option<u16> {
+        // Ratatui pre-filters labels to [bottom, top] inclusive.
+        if y < y_lo || y > y_hi {
+            return None;
+        }
+        let resolution_h = f64::from(height.saturating_sub(1));
+        let span = y_hi - y_lo;
+        if span <= 0.0 || height == 0 {
+            return None;
+        }
+        let frac = (y_hi - y) * resolution_h / span;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Some(frac as u16) // truncates toward zero, same as ratatui's `as u16` cast
+    }
+
+    /// Renders only the scale-ruler ticks into a [`TestBackend`] buffer and
+    /// returns the `(col, row)` positions of every cell that contains a tick
+    /// character (·, ╴, ┤, ╡, or ╣).
+    fn rendered_tick_cells(
+        y_lo: f64,
+        y_hi: f64,
+        setpoint: f64,
+        width: u16,
+        height: u16,
+    ) -> std::collections::HashSet<(u16, u16)> {
+        const TICK_SYMS: &[&str] = &["·", "╴", "┤", "╡", "╣"];
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::canvas::Canvas;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let x_max = (f64::from(width) - 1.0).max(1.0);
+        let ticks = super::scale_ticks(y_lo, y_hi, setpoint, height);
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let canvas = Canvas::default()
+                    .marker(ratatui::symbols::Marker::Braille)
+                    .x_bounds([0.0, x_max])
+                    .y_bounds([y_lo, y_hi])
+                    .paint(move |ctx| {
+                        for (y, sym) in &ticks {
+                            ctx.print(x_max, *y, ratatui::text::Span::raw(*sym));
+                        }
+                    });
+                f.render_widget(canvas, area);
+            })
+            .unwrap();
+        let mut cells = std::collections::HashSet::new();
+        let buf = terminal.backend().buffer().clone();
+        for row in 0..height {
+            for col in 0..width {
+                let cell = buf
+                    .cell(ratatui::layout::Position { x: col, y: row })
+                    .unwrap();
+                if TICK_SYMS.contains(&cell.symbol()) {
+                    cells.insert((col, row));
+                }
+            }
+        }
+        cells
+    }
+
+    /// Diagnostic: renders the scale ruler at several zoom levels and dumps the
+    /// buffer to stderr so you can visually inspect tick placement.
+    ///
+    /// Run with:
+    /// ```text
+    /// cargo test -p pid-ctl --features tui scale_ruler_debug -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "manual debug render; run with --ignored --nocapture"]
+    fn scale_ruler_debug_render() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::canvas::Canvas;
+        let sp = 60.0_f64;
+        let height: u16 = 20;
+        let width: u16 = 10;
+        for &half_span in &[0.3_f64, 1.0, 3.0, 10.0, 30.0] {
+            let y_lo = sp - half_span;
+            let y_hi = sp + half_span;
+            let ticks = super::scale_ticks(y_lo, y_hi, sp, height);
+            eprintln!("\n── half_span={half_span} y=[{y_lo:.2}, {y_hi:.2}] ──");
+            for &(y, sym) in &ticks {
+                let row = y_to_char_row(y, y_lo, y_hi, height);
+                eprintln!("  scale_ticks: y={y:.6} {sym} → predicted row {row:?}");
+            }
+            let x_max = (f64::from(width) - 1.0).max(1.0);
+            let ticks2 = super::scale_ticks(y_lo, y_hi, sp, height);
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    let canvas = Canvas::default()
+                        .marker(ratatui::symbols::Marker::Braille)
+                        .x_bounds([0.0, x_max])
+                        .y_bounds([y_lo, y_hi])
+                        .paint(move |ctx| {
+                            for (y, sym) in &ticks2 {
+                                ctx.print(x_max, *y, ratatui::text::Span::raw(*sym));
+                            }
+                        });
+                    f.render_widget(canvas, area);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            eprintln!("  rendered buffer (right edge, {height} rows):");
+            for row in 0..height {
+                let sym: String = (0..width)
+                    .map(|col| {
+                        buf.cell(ratatui::layout::Position { x: col, y: row })
+                            .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                    })
+                    .collect();
+                eprintln!("    row {row:2}: {sym}");
+            }
+        }
+    }
+
+    /// Every tick whose world-Y sits more than one row-height inside the visible
+    /// window must actually appear in the rendered buffer.  Sweep 200 zoom levels
+    /// from ±0.5 % to ±50 % of SP=60 to simulate smooth zoom animation.
+    #[test]
+    fn scale_ruler_interior_ticks_always_rendered() {
+        let sp = 60.0_f64;
+        let height: u16 = 20;
+        let width: u16 = 10;
+
+        for i in 0..=200_u32 {
+            let half_span = sp * (0.005 + 0.495 * (f64::from(i) / 200.0));
+            let y_lo = sp - half_span;
+            let y_hi = sp + half_span;
+            let row_world = (y_hi - y_lo) / f64::from(height);
+
+            let ticks = super::scale_ticks(y_lo, y_hi, sp, height);
+            let cells = rendered_tick_cells(y_lo, y_hi, sp, width, height);
+            let rendered_rows: std::collections::HashSet<u16> =
+                cells.iter().map(|&(_, row)| row).collect();
+
+            for &(y, _sym) in &ticks {
+                // Skip ticks within one row-height of either edge — they are
+                // legitimately at risk of being clipped by ratatui's canvas.
+                if y <= y_lo + row_world || y >= y_hi - row_world {
+                    continue;
+                }
+                let expected_row = y_to_char_row(y, y_lo, y_hi, height)
+                    .expect("interior tick must map to a valid character row");
+                assert!(
+                    rendered_rows.contains(&expected_row),
+                    "zoom step {i}: tick at y={y:.6} (expected row {expected_row}) \
+                     not found in rendered buffer \
+                     (y_lo={y_lo:.6}, y_hi={y_hi:.6}, half_span={half_span:.6})"
+                );
+            }
+        }
+    }
+
+    /// # Cadence tests — exact row positions
+    ///
+    /// These three tests use SP=100 (→ sub=1.0, integer tick positions) and
+    /// spans chosen so that ratatui's label formula
+    ///
+    /// ```text
+    /// row = floor((y_hi − y) × (height − 1) / span)
+    /// ```
+    ///
+    /// produces integer results with a predictable stride.  Each test asserts:
+    /// 1. `scale_ticks` emits exactly the expected set of ticks.
+    /// 2. `y_to_char_row` maps each tick to the expected row (no surprises in
+    ///    the math).
+    /// 3. `rendered_tick_cells` finds a tick character in every expected row of
+    ///    the actual ratatui output.
+    ///
+    /// ## Every row (stride=1, height=20, span=19)
+    ///
+    /// `row = (110 − y) × 19 / 19 = 110 − y` exactly.
+    /// 20 integer y-values in [91, 110] → one tick per row, rows 0–19.
+    #[test]
+    fn scale_ruler_cadence_every_row() {
+        let sp = 100.0_f64;
+        let y_lo = 91.0_f64;
+        let y_hi = 110.0_f64; // span = 19 = height − 1
+        let height: u16 = 20;
+        let width: u16 = 5;
+
+        let ticks = super::scale_ticks(y_lo, y_hi, sp, height);
+        assert_eq!(
+            ticks.len(),
+            20,
+            "expected 20 ticks (one per row); got {}: {ticks:?}",
+            ticks.len()
+        );
+
+        // Predict and verify each tick's character row.
+        let expected_rows: Vec<u16> = (0..20_u16).collect(); // rows 0,1,...,19
+        let mut actual_rows: Vec<u16> = ticks
+            .iter()
+            .map(|&(y, _)| {
+                y_to_char_row(y, y_lo, y_hi, height)
+                    .unwrap_or_else(|| panic!("tick y={y} out of canvas bounds"))
+            })
+            .collect();
+        actual_rows.sort_unstable();
+        assert_eq!(
+            actual_rows, expected_rows,
+            "tick rows should be exactly 0..19 (one tick per row)"
+        );
+
+        // Verify in the rendered ratatui buffer.
+        let cells = rendered_tick_cells(y_lo, y_hi, sp, width, height);
+        let rendered_rows: std::collections::HashSet<u16> = cells.iter().map(|&(_, r)| r).collect();
+        for row in 0..height {
+            assert!(
+                rendered_rows.contains(&row),
+                "rendered buffer missing tick at row {row} (every-row cadence)"
+            );
+        }
+    }
+
+    /// ## Every other row (stride=1, height=11, span=5)
+    ///
+    /// `row = (100 − y) × 10 / 5 = 2 × (100 − y)` exactly.
+    /// 6 integer y-values in [95, 100] → ticks at rows 0, 2, 4, 6, 8, 10.
+    /// Odd rows (1, 3, 5, 7, 9) are always empty.
+    #[test]
+    fn scale_ruler_cadence_every_other_row() {
+        let sp = 100.0_f64;
+        let y_lo = 95.0_f64;
+        let y_hi = 100.0_f64; // span = 5, height − 1 = 10, ratio = 2
+        let height: u16 = 11;
+        let width: u16 = 5;
+
+        let ticks = super::scale_ticks(y_lo, y_hi, sp, height);
+        assert_eq!(
+            ticks.len(),
+            6,
+            "expected 6 ticks; got {}: {ticks:?}",
+            ticks.len()
+        );
+
+        let expected_rows: Vec<u16> = vec![0, 2, 4, 6, 8, 10];
+        let mut actual_rows: Vec<u16> = ticks
+            .iter()
+            .map(|&(y, _)| {
+                y_to_char_row(y, y_lo, y_hi, height)
+                    .unwrap_or_else(|| panic!("tick y={y} out of canvas bounds"))
+            })
+            .collect();
+        actual_rows.sort_unstable();
+        assert_eq!(
+            actual_rows, expected_rows,
+            "tick rows should be exactly [0,2,4,6,8,10]"
+        );
+
+        // Rendered buffer: even rows filled, odd rows empty.
+        let cells = rendered_tick_cells(y_lo, y_hi, sp, width, height);
+        let rendered_rows: std::collections::HashSet<u16> = cells.iter().map(|&(_, r)| r).collect();
+        let even_rows: Vec<u16> = (0..height).filter(|r| r % 2 == 0).collect();
+        let odd_rows: Vec<u16> = (0..height).filter(|r| r % 2 != 0).collect();
+        for row in &even_rows {
+            assert!(
+                rendered_rows.contains(row),
+                "rendered buffer missing tick at even row {row}"
+            );
+        }
+        for row in &odd_rows {
+            assert!(
+                !rendered_rows.contains(row),
+                "rendered buffer has unexpected tick at odd row {row}"
+            );
+        }
+    }
+
+    /// ## Every 4th row (stride=5 forced, height=21, span=25)
+    ///
+    /// span=25 > height=21 forces stride=5 (`sub_count=25`, 25/5=5 ≤ 21).
+    /// `row = (100 − y) × 20 / 25 = 4(100 − y)/5` exactly for y ∈ {75,80,85,90,95,100}.
+    /// 6 ticks at rows 0, 4, 8, 12, 16, 20.
+    #[test]
+    fn scale_ruler_cadence_every_4th_row() {
+        let sp = 100.0_f64;
+        let y_lo = 75.0_f64;
+        let y_hi = 100.0_f64; // span = 25, height − 1 = 20, ratio = 4
+        let height: u16 = 21;
+        let width: u16 = 5;
+
+        let ticks = super::scale_ticks(y_lo, y_hi, sp, height);
+        assert_eq!(
+            ticks.len(),
+            6,
+            "expected 6 ticks (stride=5 forced by span > height); got {}: {ticks:?}",
+            ticks.len()
+        );
+
+        let expected_rows: Vec<u16> = vec![0, 4, 8, 12, 16, 20];
+        let mut actual_rows: Vec<u16> = ticks
+            .iter()
+            .map(|&(y, _)| {
+                y_to_char_row(y, y_lo, y_hi, height)
+                    .unwrap_or_else(|| panic!("tick y={y} out of canvas bounds"))
+            })
+            .collect();
+        actual_rows.sort_unstable();
+        assert_eq!(
+            actual_rows, expected_rows,
+            "tick rows should be exactly [0,4,8,12,16,20]"
+        );
+
+        // Rendered buffer: rows 0,4,8,12,16,20 have ticks; rest are empty.
+        let cells = rendered_tick_cells(y_lo, y_hi, sp, width, height);
+        let rendered_rows: std::collections::HashSet<u16> = cells.iter().map(|&(_, r)| r).collect();
+        for &row in &expected_rows {
+            assert!(
+                rendered_rows.contains(&row),
+                "rendered buffer missing tick at row {row} (every-4th-row cadence)"
+            );
+        }
+        let empty_count = (0..height)
+            .filter(|r| !expected_rows.contains(r))
+            .filter(|r| rendered_rows.contains(r))
+            .count();
+        assert_eq!(
+            empty_count, 0,
+            "rendered buffer has {empty_count} unexpected tick(s) in non-cadence rows"
+        );
+    }
+
+    /// When consecutive ticks are spread far enough apart to occupy distinct
+    /// rows each, no two ticks should share a row (one would be invisible,
+    /// hidden behind the other).  Collisions are expected when the tick grid
+    /// # Cadence-with-perturbation tests
+    ///
+    /// Each of the three exact cadence scenarios is repeated with the window
+    /// slid continuously across one full tick period in 200 sub-pixel steps.
+    /// At every step every interior tick (>1 row-height from the edge) must
+    /// be present in the rendered buffer — no popping in and out.
+    ///
+    /// The slide distance equals exactly one tick spacing so the test covers
+    /// the full cycle of a tick approaching an edge, disappearing (legitimately,
+    /// within the edge-exclusion margin), and re-emerging on the other side.
+    ///
+    /// ## Perturbed every-row (tick spacing = 1.0, slide by 1.0)
+    #[test]
+    fn scale_ruler_cadence_every_row_perturbed() {
+        let sp = 100.0_f64;
+        let span = 19.0_f64; // height − 1 = 19 → exact integer row mapping
+        let height: u16 = 20;
+        let width: u16 = 5;
+        let row_world = span / f64::from(height);
+        let tick_spacing = 1.0_f64; // stride=1, sub=1
+
+        for i in 0..=200_u32 {
+            let shift = tick_spacing * f64::from(i) / 200.0; // 0.000 .. 1.000
+            let y_lo = 91.0 + shift;
+            let y_hi = y_lo + span;
+
+            let ticks = super::scale_ticks(y_lo, y_hi, sp, height);
+            let cells = rendered_tick_cells(y_lo, y_hi, sp, width, height);
+            let rendered_rows: std::collections::HashSet<u16> =
+                cells.iter().map(|&(_, r)| r).collect();
+
+            for &(y, _) in &ticks {
+                if y <= y_lo + row_world || y >= y_hi - row_world {
+                    continue; // legitimately near an edge — allowed to clip
+                }
+                let row = y_to_char_row(y, y_lo, y_hi, height)
+                    .expect("interior tick must map to a valid row");
+                assert!(
+                    rendered_rows.contains(&row),
+                    "every-row perturb step {i} (shift={shift:.4}): \
+                     interior tick y={y:.6} missing from row {row} \
+                     (y_lo={y_lo:.4}, y_hi={y_hi:.4})"
+                );
+            }
+        }
+    }
+
+    /// ## Perturbed every-other-row (tick spacing = 1.0, slide by 1.0)
+    ///
+    /// Base: `y_lo=95`, `y_hi=100`, height=11, span=5 → stride=1, row step = 2.
+    /// Sliding by one tick spacing (1.0) covers all fractional alignments
+    /// between the integer tick grid and the row grid.
+    #[test]
+    fn scale_ruler_cadence_every_other_row_perturbed() {
+        let sp = 100.0_f64;
+        let span = 5.0_f64;
+        let height: u16 = 11;
+        let width: u16 = 5;
+        let row_world = span / f64::from(height);
+        let tick_spacing = 1.0_f64; // stride=1, sub=1
+
+        for i in 0..=200_u32 {
+            let shift = tick_spacing * f64::from(i) / 200.0;
+            let y_lo = 95.0 + shift;
+            let y_hi = y_lo + span;
+
+            let ticks = super::scale_ticks(y_lo, y_hi, sp, height);
+            let cells = rendered_tick_cells(y_lo, y_hi, sp, width, height);
+            let rendered_rows: std::collections::HashSet<u16> =
+                cells.iter().map(|&(_, r)| r).collect();
+
+            for &(y, _) in &ticks {
+                if y <= y_lo + row_world || y >= y_hi - row_world {
+                    continue;
+                }
+                let row = y_to_char_row(y, y_lo, y_hi, height)
+                    .expect("interior tick must map to a valid row");
+                assert!(
+                    rendered_rows.contains(&row),
+                    "every-other-row perturb step {i} (shift={shift:.4}): \
+                     interior tick y={y:.6} missing from row {row} \
+                     (y_lo={y_lo:.4}, y_hi={y_hi:.4})"
+                );
+            }
+        }
+    }
+
+    /// ## Perturbed every-4th-row (tick spacing = 5.0, slide by 5.0)
+    ///
+    /// Base: `y_lo=75`, `y_hi=100`, height=21, span=25 → stride=5, row step = 4.
+    /// Sliding by one tick spacing (5.0) covers all fractional alignments
+    /// between the stride-5 tick grid and the row grid.
+    #[test]
+    fn scale_ruler_cadence_every_4th_row_perturbed() {
+        let sp = 100.0_f64;
+        let span = 25.0_f64;
+        let height: u16 = 21;
+        let width: u16 = 5;
+        let row_world = span / f64::from(height);
+        let tick_spacing = 5.0_f64; // stride=5, sub=1
+
+        for i in 0..=200_u32 {
+            let shift = tick_spacing * f64::from(i) / 200.0;
+            let y_lo = 75.0 + shift;
+            let y_hi = y_lo + span;
+
+            let ticks = super::scale_ticks(y_lo, y_hi, sp, height);
+            let cells = rendered_tick_cells(y_lo, y_hi, sp, width, height);
+            let rendered_rows: std::collections::HashSet<u16> =
+                cells.iter().map(|&(_, r)| r).collect();
+
+            for &(y, _) in &ticks {
+                if y <= y_lo + row_world || y >= y_hi - row_world {
+                    continue;
+                }
+                let row = y_to_char_row(y, y_lo, y_hi, height)
+                    .expect("interior tick must map to a valid row");
+                assert!(
+                    rendered_rows.contains(&row),
+                    "every-4th-row perturb step {i} (shift={shift:.4}): \
+                     interior tick y={y:.6} missing from row {row} \
+                     (y_lo={y_lo:.4}, y_hi={y_hi:.4})"
+                );
+            }
+        }
+    }
+
+    /// is denser than one row-height, so we skip those zoom levels.
+    #[test]
+    fn scale_ruler_no_row_collisions_when_ticks_are_sparse() {
+        let sp = 60.0_f64;
+        let height: u16 = 20;
+        for &half_span in &[0.5_f64, 1.0, 2.0, 5.0, 10.0, 20.0] {
+            let y_lo = sp - half_span;
+            let y_hi = sp + half_span;
+            let ticks = super::scale_ticks(y_lo, y_hi, sp, height);
+            // Skip if there are more ticks than rows: collisions are unavoidable.
+            if ticks.len() > usize::from(height) {
+                continue;
+            }
+            let mut rows: Vec<u16> = ticks
+                .iter()
+                .filter_map(|&(y, _)| y_to_char_row(y, y_lo, y_hi, height))
+                .collect();
+            rows.sort_unstable();
+            let original_len = rows.len();
+            rows.dedup();
+            assert_eq!(
+                rows.len(),
+                original_len,
+                "half_span={half_span}: duplicate character rows — some ticks are \
+                 hidden by collision (ticks={ticks:?})"
+            );
+        }
     }
 }
