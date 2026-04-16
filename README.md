@@ -51,7 +51,7 @@ This project is built for **operators and automation** who already live in shell
 
 ## Requirements
 
-- **Rust** toolchain matching the workspace (`rust-version` in the root `Cargo.toml`; currently **1.85+**).
+- **Rust** toolchain matching the workspace (`rust-version` in the root `Cargo.toml`; currently **1.86+**).
 - **Unix** for socket-based remote commands and the default TUI tuning mode (terminal handling).
 
 ## Building
