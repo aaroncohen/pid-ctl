@@ -23,7 +23,7 @@ Below, **PV** (*process variable*) means the measured value you read, and **CV**
 - **`status`** — Inspect persisted controller state and/or query a running **`loop`** over a **Unix domain socket** (see below).
 - **State file** — Optional JSON **persistence** (`--state`) with `init` / `purge`, configurable flush interval, and failure policies for disk writes.
 - **Structured logging** — **NDJSON** events on stderr and/or `--log` (ISO8601 timestamps, schema version). Human-readable **text** or **JSON** summaries where applicable.
-- **`--tune` (TUI)** — Interactive tuning dashboard (requires the default `tui` feature and a TTY): adjust gains, setpoint, and related options while the loop runs; sparkline-style history.
+- **`--tune` (TUI)** — Interactive tuning dashboard (requires the default `tui` feature and a TTY): adjust gains, setpoint, and related options while the loop runs. The PV panel renders both the PV and SP traces as a Braille-dot canvas overlay so step changes in setpoint are visible alongside the measured response. A scale ruler on the right edge of the PV canvas uses tick characters (`·` sub-step, `╴` half-step, `┤` base step, `╡` major step, `╣` decade) anchored to the setpoint's natural scale so ticks remain stable across zoom levels. A minimum-zoom floor prevents the graph from collapsing to a dot when PV has fully converged. The CV panel uses a sparkline.
 - **Unix-only: control socket** — While `loop` runs with `--socket`, use **`set`**, **`hold`**, **`resume`**, **`reset`**, and **`save`** to change parameters or coordinate shutdown without restarting the process.
 
 ### Simulator (`pid-ctl-sim`)
@@ -298,6 +298,17 @@ stty -F /dev/ttyUSB0 9600 raw && cat /dev/ttyUSB0 \
 **Problem.** Editing config files between trials is slow; **`--tune`** runs the same **`loop`** as production but overlays a TUI to bump gains and setpoint and see integral behavior.
 
 **What the config does.** Everything from a normal **`loop`**, plus **`--tune`**. Requires a **TTY** and the default **`tui`** feature. Use **`--units`** so the dashboard labels match what operators expect.
+
+**Dashboard layout.** The screen is divided into panels:
+- **PROCESS** — Setpoint, PV (actual), and current error, with a note when setpoint ramping is active.
+- **OUTPUT** — CV (last applied / commanded), range, hold and dry-run flags.
+- **PID BREAKDOWN** — Current P, I, D, and accumulator contributions with plain-English labels; anti-windup status.
+- **GAINS** — Live-editable Kp, Ki, Kd, and SP with `←`/`→` to select and `↑`/`↓` to adjust; `[]` to change step size.
+- **HISTORY (PV canvas)** — Both PV and SP rendered as Braille-dot traces on a shared canvas. The Y range auto-scales to PV ∪ SP over the last 1.5× display window with a minimum span of ±1% of |SP|. A scale ruler on the right edge uses tick characters (`·` `╴` `┤` `╡` `╣`) whose magnitude classes are anchored to the setpoint's natural scale and remain stable as zoom changes.
+- **CV sparkline** — Recent CV history below the PV canvas.
+- **Keyboard shortcuts** — shown at the top and bottom of the screen (`s` save, `q` quit, `r` reset accumulator, `h` hold, `d` dry-run, `c` export, `?` help).
+
+![pid-ctl tuning dashboard](screenshots/pid-ctl-screen1.png)
 
 **Live MQTT process** (same wiring as production; tune until step responses look acceptable, then keep the **`--state`** file as the source of truth):
 
