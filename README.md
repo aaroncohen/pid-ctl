@@ -20,7 +20,7 @@ Below, **PV** (*process variable*) means the measured value you read, and **CV**
 ### CLI (`pid-ctl`)
 
 - **`once`** — Run a **single** PID tick for scripting and tests (literal PV, file, or command-sourced PV; CV to stdout, file, or command).
-- **`pipe`** — Read PV lines from **stdin**, write CV lines to **stdout** (composable in shell pipelines). Timing uses wall-clock spacing between lines (first tick uses `--dt`).
+- **`pipe`** — Read PV lines from **stdin**, write CV lines to **stdout** (composable in shell pipelines). Each line's time step is the wall-clock elapsed time since the previous line, so the PID math scales correctly to irregular or fast/slow streams. The very first line has no predecessor, so its time step defaults to 1 second (override with `--dt`).
 - **`loop`** — Periodic **control loop** with a wall-clock **interval**, PV from **file**, **command**, or **stdin** (one line per tick, with optional timeout).
 - **`status`** — Inspect persisted controller state and/or query a running **`loop`** over a **Unix domain socket** (see below).
 - **State file** — Optional JSON **persistence** (`--state`) with `init` / `purge`, configurable flush interval, and failure policies for disk writes.
