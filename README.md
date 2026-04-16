@@ -2,6 +2,8 @@
 
 ![pid-ctl tuning dashboard](screenshots/pid-ctl-screen1.png)
 
+> **Disclaimer:** pid-ctl is provided as-is, without any warranty of correctness, reliability, or fitness for a particular purpose. It is intended for hobbyist, experimental, and non-critical automation tasks only. **Do not use it in life-safety, medical, industrial safety, or any other application where a failure could result in injury, death, or serious harm.** See the [MIT License](./LICENSE) for the full warranty disclaimer.
+
 Many automation tasks are feedback loops: read a measurement from a sensor, a file, or a small script; compare it to a target; adjust an output you control (heater duty, fan speed, valve position, PWM); repeat on a schedule or whenever new data arrives. **pid-ctl** implements the middle step—the control law—so you can wire **measurement → decision → output** into scripts, `cron`, `systemd`, and shell pipelines instead of a separate GUI or proprietary runtime.
 
 The project ships as a CLI and a small Rust library. You configure a target, where to read the current value, and where to send the next control value, using files, subprocesses, standard I/O, or an optional simulator for dry runs. A **PID** controller is used under the hood: it combines proportional, integral, and derivative terms to decide how strongly to push the output so the measurement tracks the target. Gains, limits, and safety-related options are exposed as flags; a terminal dashboard is available for live tuning on `loop`.
