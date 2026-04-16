@@ -8,6 +8,20 @@ The project ships as a CLI and a small Rust library. You configure a target, whe
 
 Below, **PV** (*process variable*) means the measured value you read, and **CV** (*control variable*) means the value you send to the actuator—standard names in process control. The repository is a Rust workspace with three crates (core math, CLI, simulator). The sections below describe how to use the CLI end-to-end; `pid-ctl --help` and `pid-ctl <command> --help` list every flag.
 
+## Use cases
+
+**Temperature control.** A lab incubator reads °C from a sensor file every 5 seconds and writes heater duty (0–100%) to a sysfs PWM node. When the measured temperature drifts below target, pid-ctl increases output; when it overshoots, it backs off. Integral action eliminates the small steady-state offset that pure proportional control leaves behind.
+
+**Fan speed regulation.** A server or 3D printer reads a thermal zone from `/sys/class/thermal/…` and drives a PWM fan. pid-ctl scales millidegree sysfs values to °C, clamps the fan floor so it never fully stops, and runs under systemd with JSON state so gains survive reboots.
+
+**MQTT-connected processes.** A greenhouse zone reads temperature from an MQTT topic via `mosquitto_sub` and publishes valve position back on another topic via `mosquitto_pub`. The `--pv-cmd` / `--cv-cmd` flags wrap the broker calls; pid-ctl handles the math and interval timing.
+
+**Scripted or event-driven control.** A `cron` job or udev hook calls `pid-ctl once` to do a single control tick and exit—no daemon required. The state file carries integral memory between runs so accumulated error is not forgotten.
+
+**Stream processing.** A log pipeline tails sensor output with `tail -f`, filters it with `awk`, pipes it through `pid-ctl pipe`, and hands the CV stream to `xargs` for actuation. pid-ctl measures wall-clock spacing between lines so the math is correct even when the upstream rate varies.
+
+**Commissioning and tuning.** Before wiring real hardware, run the included `pid-ctl-sim` thermal simulator with `loop --tune` to explore how gain choices affect step response in a safe, repeatable environment. The interactive dashboard (shown above) lets you adjust Kp, Ki, Kd, and setpoint live and watch PV and SP traces update in real time.
+
 ## Features
 
 ### Control core (`pid-ctl-core`)
