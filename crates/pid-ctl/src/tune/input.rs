@@ -7,6 +7,7 @@ use crate::CliError;
 use crate::LoopArgs;
 use crossterm::event::{KeyCode, KeyModifiers};
 use pid_ctl::app::ControllerSession;
+use pid_ctl::app::logger::Logger;
 use pid_ctl::json_events;
 use pid_ctl_core::PidConfig;
 use std::time::{Duration, Instant};
@@ -49,17 +50,17 @@ pub(in crate::tune) fn handle_normal_key(
     args: &mut LoopArgs,
     key: crossterm::event::KeyEvent,
     full_argv: &[String],
-    log_file: &mut Option<std::fs::File>,
+    logger: &mut Logger,
 ) {
     match key.code {
         KeyCode::Char('q') => {
             export_line_stderr(full_argv, args);
-            flush_shutdown(session, args, log_file);
+            flush_shutdown(session, args, logger);
             ui.quit = true;
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             export_line_stderr(full_argv, args);
-            flush_shutdown(session, args, log_file);
+            flush_shutdown(session, args, logger);
             ui.quit = true;
         }
         KeyCode::Char('c') => {
@@ -74,7 +75,7 @@ pub(in crate::tune) fn handle_normal_key(
                 eprintln!("save failed: {err}");
             } else {
                 json_events::emit_gains_saved(
-                    log_file,
+                    logger,
                     ui.last_record.as_ref().map_or(0, |r| r.iter),
                 );
                 ui.status_flash = Some(("Saved".into(), Instant::now()));
@@ -105,8 +106,8 @@ pub(in crate::tune) fn handle_normal_key(
         }
         KeyCode::Up => ui.focus = ui.focus.prev(),
         KeyCode::Down => ui.focus = ui.focus.next(),
-        KeyCode::Left => adjust_focused_gain(ui, session, args, log_file, -1.0),
-        KeyCode::Right => adjust_focused_gain(ui, session, args, log_file, 1.0),
+        KeyCode::Left => adjust_focused_gain(ui, session, args, logger, -1.0),
+        KeyCode::Right => adjust_focused_gain(ui, session, args, logger, 1.0),
         KeyCode::Char('[') => {
             ui.step[ui.focus.idx()] = step_125_down(ui.step[ui.focus.idx()]);
         }
@@ -121,7 +122,7 @@ pub(in crate::tune) fn adjust_focused_gain(
     ui: &mut TuneUiState,
     session: &mut ControllerSession,
     args: &mut LoopArgs,
-    log_file: &mut Option<std::fs::File>,
+    logger: &mut Logger,
     sign: f64,
 ) {
     let step = ui.step[ui.focus.idx()] * sign;
@@ -136,7 +137,7 @@ pub(in crate::tune) fn adjust_focused_gain(
     ui.note_gain_change(args, session.config());
     let iter = ui.last_record.as_ref().map_or(0, |r| r.iter);
     let c = session.config();
-    json_events::emit_gains_changed(log_file, c.kp, c.ki, c.kd, c.setpoint, iter, "tui");
+    json_events::emit_gains_changed(logger, c.kp, c.ki, c.kd, c.setpoint, iter, "tui");
 }
 
 pub(in crate::tune) fn handle_command_key(
@@ -145,7 +146,7 @@ pub(in crate::tune) fn handle_command_key(
     args: &mut LoopArgs,
     key: crossterm::event::KeyEvent,
     full_argv: &[String],
-    log_file: &mut Option<std::fs::File>,
+    logger: &mut Logger,
 ) -> Result<(), CliError> {
     match key.code {
         KeyCode::Esc => {
@@ -153,7 +154,7 @@ pub(in crate::tune) fn handle_command_key(
             ui.command_buf.clear();
         }
         KeyCode::Enter => {
-            run_command_line(ui, session, args, full_argv, log_file)?;
+            run_command_line(ui, session, args, full_argv, logger)?;
             ui.command_mode = false;
             ui.command_buf.clear();
         }
@@ -174,7 +175,7 @@ pub(in crate::tune) fn run_command_line(
     session: &mut ControllerSession,
     args: &mut LoopArgs,
     full_argv: &[String],
-    log_file: &mut Option<std::fs::File>,
+    logger: &mut Logger,
 ) -> Result<(), CliError> {
     let line = ui.command_buf.trim();
     let mut parts = line.split_whitespace();
@@ -183,7 +184,7 @@ pub(in crate::tune) fn run_command_line(
         "" => Ok(()),
         "quit" | "exit" => {
             export_line_stderr(full_argv, args);
-            flush_shutdown(session, args, log_file);
+            flush_shutdown(session, args, logger);
             ui.quit = true;
             Ok(())
         }
@@ -198,7 +199,7 @@ pub(in crate::tune) fn run_command_line(
             args.pid_config = session.config().clone();
             ui.note_gain_change(args, session.config());
             json_events::emit_gains_changed(
-                log_file,
+                logger,
                 v,
                 c.ki,
                 c.kd,
@@ -219,7 +220,7 @@ pub(in crate::tune) fn run_command_line(
             args.pid_config = session.config().clone();
             ui.note_gain_change(args, session.config());
             json_events::emit_gains_changed(
-                log_file,
+                logger,
                 c.kp,
                 v,
                 c.kd,
@@ -240,7 +241,7 @@ pub(in crate::tune) fn run_command_line(
             args.pid_config = session.config().clone();
             ui.note_gain_change(args, session.config());
             json_events::emit_gains_changed(
-                log_file,
+                logger,
                 c.kp,
                 c.ki,
                 v,
@@ -261,7 +262,7 @@ pub(in crate::tune) fn run_command_line(
             ui.note_gain_change(args, session.config());
             let c = session.config();
             json_events::emit_gains_changed(
-                log_file,
+                logger,
                 c.kp,
                 c.ki,
                 c.kd,
@@ -299,7 +300,7 @@ pub(in crate::tune) fn run_command_line(
                 eprintln!("save failed: {err}");
             } else {
                 json_events::emit_gains_saved(
-                    log_file,
+                    logger,
                     ui.last_record.as_ref().map_or(0, |r| r.iter),
                 );
                 ui.status_flash = Some(("Saved".into(), Instant::now()));

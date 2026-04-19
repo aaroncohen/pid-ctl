@@ -21,16 +21,17 @@ use input::{handle_command_key, handle_normal_key};
 use model::{TUNE_IDLE_DRAW_DEADLINE_NEAR, TUNE_IDLE_DRAW_MIN, TuneUiState};
 use pid_ctl::adapters::{CvSink, DryRunCvSink};
 use pid_ctl::app::adapters_build::{build_cv_sink, build_pv_source};
+use pid_ctl::app::logger::Logger;
 use pid_ctl::app::loop_runtime::{
     MeasuredDt, apply_measured_dt, emit_state_write_failure, handle_dt_skip_state_write,
-    open_log_optional, write_safe_cv,
+    write_safe_cv,
 };
 use pid_ctl::app::{ControllerSession, TickOutcome};
 use pid_ctl::json_events;
 use pid_ctl::schedule::next_deadline_after_tick;
 use ratatui::Terminal;
 use render::draw;
-use std::io::{self, Write};
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -40,7 +41,6 @@ use std::time::{Duration, Instant};
 // place — splitting it further would require passing state through many helper boundaries.
 #[allow(clippy::too_many_lines)]
 pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
-    let _suppress_structured_json_stderr = json_events::suppress_structured_json_stderr();
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|e| CliError::config(e.to_string()))?;
     let cfg0 = session.config().clone();
@@ -56,15 +56,18 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
         .cv_sink
         .as_ref()
         .map(|cfg| build_cv_sink(cfg, args.cv_precision, args.cmd_timeout));
-    let mut log_file = open_log_optional(args.log_path.as_deref()).map_err(|e| {
-        CliError::new(
-            1,
-            format!(
-                "failed to open log file {}: {e}",
-                args.log_path.as_deref().unwrap().display()
-            ),
-        )
-    })?;
+    // Suppress stderr so JSON event lines don't interleave with the ratatui alternate-screen TUI.
+    let mut logger = Logger::open(args.log_path.as_deref())
+        .map_err(|e| {
+            CliError::new(
+                1,
+                format!(
+                    "failed to open log file {}: {e}",
+                    args.log_path.as_deref().unwrap().display()
+                ),
+            )
+        })?
+        .suppressed();
 
     // Bind socket listener when --socket is set.
     let socket_listener = if let Some(ref path) = args.socket_path {
@@ -103,7 +106,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
         loop {
             if shutdown.load(Ordering::Relaxed) || ui.quit {
                 export_line_stderr(full_argv, &args);
-                flush_shutdown(&mut session, &args, &mut log_file);
+                flush_shutdown(&mut session, &args, &mut logger);
                 return Ok(());
             }
 
@@ -132,7 +135,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                                 &mut args,
                                 key,
                                 full_argv,
-                                &mut log_file,
+                                &mut logger,
                             )?;
                         } else {
                             handle_normal_key(
@@ -141,7 +144,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                                 &mut args,
                                 key,
                                 full_argv,
-                                &mut log_file,
+                                &mut logger,
                             );
                         }
                     }
@@ -156,7 +159,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                 for _ in 0..10 {
                     match listener.try_service_one(|req| {
                         let (resp, effect) =
-                            handle_socket_request(&req, &mut session, &mut args, &mut log_file);
+                            handle_socket_request(&req, &mut session, &mut args, &mut logger);
                         match effect {
                             SocketSideEffect::Hold => ui.hold = true,
                             SocketSideEffect::Resume => ui.hold = false,
@@ -205,14 +208,14 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                 args.max_dt,
                 args.dt_clamp,
                 false, // tune is never quiet (tune and --quiet are mutually exclusive)
-                &mut log_file,
+                &mut logger,
             ) {
                 MeasuredDt::Skip => {
                     handle_dt_skip_state_write(
                         session.on_dt_skipped(),
                         &session,
                         args.state_path.as_ref(),
-                        &mut log_file,
+                        &mut logger,
                         false,
                     );
                     draw(
@@ -237,7 +240,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                 Err(error) => {
                     pv_fail_count += 1;
                     json_events::emit_pv_read_failure(
-                        &mut log_file,
+                        &mut logger,
                         error.to_string(),
                         args.safe_cv,
                     );
@@ -290,7 +293,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                             emit_state_write_failure(
                                 &session,
                                 args.state_path.as_ref(),
-                                &mut log_file,
+                                &mut logger,
                                 &e,
                                 false,
                             );
@@ -322,7 +325,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                     dt,
                     &mut session,
                     active,
-                    &mut log_file,
+                    &mut logger,
                     &mut cv_fail_count,
                 ) {
                     Ok(Some(outcome)) => {
@@ -368,7 +371,7 @@ fn tune_tick(
     dt: f64,
     session: &mut ControllerSession,
     cv_sink: &mut dyn CvSink,
-    log_file: &mut Option<std::fs::File>,
+    logger: &mut Logger,
     cv_fail_count: &mut u32,
 ) -> Result<Option<TickOutcome>, CliError> {
     let scaled_pv = raw_pv * args.scale;
@@ -378,21 +381,17 @@ fn tune_tick(
             *cv_fail_count = 0;
 
             if let Some(reason) = outcome.d_term_skipped {
-                json_events::emit_d_term_skipped(log_file, reason, outcome.record.iter);
+                json_events::emit_d_term_skipped(logger, reason, outcome.record.iter);
             }
 
             if matches!(args.output_format, OutputFormat::Json) {
                 let _ = print_iteration_json(&outcome.record);
             }
 
-            if let Some(file) = log_file.as_mut()
-                && let Ok(json) = serde_json::to_string(&outcome.record)
-            {
-                let _ = writeln!(file, "{json}");
-            }
+            logger.write_iteration_line(&outcome.record);
 
             if let Some(ref error) = outcome.state_write_failed {
-                emit_state_write_failure(session, args.state_path.as_ref(), log_file, error, false);
+                emit_state_write_failure(session, args.state_path.as_ref(), logger, error, false);
             }
 
             Ok(Some(outcome))
@@ -400,7 +399,7 @@ fn tune_tick(
         Err(error) => {
             *cv_fail_count += 1;
             let limit = args.cv_fail_after;
-            json_events::emit_cv_write_failed(log_file, error.to_string(), *cv_fail_count);
+            json_events::emit_cv_write_failed(logger, error.to_string(), *cv_fail_count);
             if *cv_fail_count >= limit {
                 write_safe_cv(args.safe_cv, cv_sink, session);
                 return Err(CliError::new(

@@ -1,17 +1,18 @@
 use crate::LoopArgs;
 use pid_ctl::app::ControllerSession;
+use pid_ctl::app::logger::Logger;
 use pid_ctl::json_events;
 use std::time::Duration;
 
 pub(in crate::tune) fn flush_shutdown(
     session: &mut ControllerSession,
     args: &LoopArgs,
-    log_file: &mut Option<std::fs::File>,
+    logger: &mut Logger,
 ) {
     if let Some(err) = session.force_flush() {
         eprintln!("state write failed at shutdown: {err}");
         if let Some(path) = &args.state_path {
-            json_events::emit_state_write_failed(log_file, path.clone(), err.to_string());
+            json_events::emit_state_write_failed(logger, path.clone(), err.to_string());
         }
     }
 }
