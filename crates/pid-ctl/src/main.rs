@@ -113,10 +113,7 @@ fn open_log(path: Option<&Path>) -> Result<Option<std::fs::File>, CliError> {
     open_log_optional(path).map_err(|e| {
         CliError::new(
             1,
-            format!(
-                "failed to open log file {}: {e}",
-                path.unwrap().display()
-            ),
+            format!("failed to open log file {}: {e}", path.unwrap().display()),
         )
     })
 }
@@ -764,4 +761,3 @@ fn run_socket_set(raw: &SetRawArgs) -> Result<(), CliError> {
     };
     socket_send_and_print(&parsed.socket_path, &req, "set")
 }
-

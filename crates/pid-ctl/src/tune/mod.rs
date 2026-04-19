@@ -11,11 +11,6 @@ use crate::CliError;
 use crate::LoopArgs;
 use crate::OutputFormat;
 use crate::print_iteration_json;
-use pid_ctl::app::adapters_build::{build_cv_sink, build_pv_source};
-use pid_ctl::app::loop_runtime::{
-    MeasuredDt, apply_measured_dt, emit_state_write_failure, handle_dt_skip_state_write,
-    open_log_optional, write_safe_cv,
-};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -25,6 +20,11 @@ use export::{export_line_stderr, flush_shutdown};
 use input::{handle_command_key, handle_normal_key};
 use model::{TUNE_IDLE_DRAW_DEADLINE_NEAR, TUNE_IDLE_DRAW_MIN, TuneUiState};
 use pid_ctl::adapters::{CvSink, DryRunCvSink};
+use pid_ctl::app::adapters_build::{build_cv_sink, build_pv_source};
+use pid_ctl::app::loop_runtime::{
+    MeasuredDt, apply_measured_dt, emit_state_write_failure, handle_dt_skip_state_write,
+    open_log_optional, write_safe_cv,
+};
 use pid_ctl::app::{ControllerSession, TickOutcome};
 use pid_ctl::json_events;
 use pid_ctl::schedule::next_deadline_after_tick;

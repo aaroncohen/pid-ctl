@@ -5,8 +5,7 @@
 //! The binary's `cli/types.rs` re-exports them.
 
 use crate::adapters::{
-    CmdCvSink, CmdPvSource, CvSink, FileCvSink, FilePvSource, PvSource, StdinPvSource,
-    StdoutCvSink,
+    CmdCvSink, CmdPvSource, CvSink, FileCvSink, FilePvSource, PvSource, StdinPvSource, StdoutCvSink,
 };
 use std::path::PathBuf;
 use std::time::Duration;

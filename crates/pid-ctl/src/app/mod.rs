@@ -2,9 +2,9 @@
 
 pub mod adapters_build;
 pub mod loop_runtime;
-pub mod state_store;
 #[cfg(unix)]
 pub mod socket_dispatch;
+pub mod state_store;
 
 use crate::adapters::CvSink;
 use pid_ctl_core::{ConfigError, PidConfig, PidController, StepInput, StepResult};
