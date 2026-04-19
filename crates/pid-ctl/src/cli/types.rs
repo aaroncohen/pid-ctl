@@ -1,7 +1,10 @@
+use pid_ctl::app::loop_runtime::LoopControls;
 use pid_ctl::app::{SessionConfig, StateStore};
 use pid_ctl_core::PidConfig;
 use std::path::PathBuf;
 use std::time::Duration;
+
+pub(crate) use pid_ctl::app::adapters_build::{CvSinkConfig, PvSourceConfig};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum OutputFormat {
@@ -148,29 +151,6 @@ impl LoopArgs {
     }
 }
 
-/// Which PV source was specified on the CLI.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum PvSourceConfig {
-    Literal(f64),
-    File(PathBuf),
-    Cmd(String),
-    /// `loop --pv-stdin`: one line per tick, with a per-tick timeout.
-    Stdin,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum CvSinkConfig {
-    Stdout,
-    File {
-        path: PathBuf,
-        verify: bool,
-    },
-    Cmd {
-        command: String,
-        timeout: Option<Duration>,
-    },
-}
-
 #[cfg(unix)]
 pub(crate) struct SetArgs {
     pub(crate) socket_path: PathBuf,
@@ -182,4 +162,44 @@ pub(crate) struct StatusFlags {
     pub(crate) state_path: Option<PathBuf>,
     #[cfg(unix)]
     pub(crate) socket_path: Option<PathBuf>,
+}
+
+impl LoopControls for LoopArgs {
+    fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    fn set_interval(&mut self, d: Duration) {
+        self.interval = d;
+    }
+
+    fn max_dt(&self) -> f64 {
+        self.max_dt
+    }
+
+    fn set_max_dt_unless_explicit(&mut self, v: f64) {
+        if !self.explicit_max_dt {
+            self.max_dt = v;
+        }
+    }
+
+    fn pv_stdin_timeout(&self) -> Duration {
+        self.pv_stdin_timeout
+    }
+
+    fn set_pv_stdin_timeout_unless_explicit(&mut self, d: Duration) {
+        if !self.explicit_pv_stdin_timeout {
+            self.pv_stdin_timeout = d;
+        }
+    }
+
+    fn state_write_interval(&self) -> Option<Duration> {
+        self.state_write_interval
+    }
+
+    fn set_state_write_interval_unless_explicit(&mut self, d: Option<Duration>) {
+        if !self.explicit_state_write_interval {
+            self.state_write_interval = d;
+        }
+    }
 }

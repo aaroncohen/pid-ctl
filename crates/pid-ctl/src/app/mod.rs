@@ -1,5 +1,9 @@
 //! Controller session scaffolding and persistence primitives for the application layer.
 
+pub mod adapters_build;
+pub mod loop_runtime;
+#[cfg(unix)]
+pub mod socket_dispatch;
 pub mod state_store;
 
 use crate::adapters::CvSink;
