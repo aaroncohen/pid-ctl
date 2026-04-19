@@ -105,6 +105,17 @@ fn state_fail_after_escalates_to_prominent_warning() {
     use std::os::unix::fs::PermissionsExt;
     use std::process;
 
+    // root bypasses chmod permission checks; the test can't simulate write failures.
+    let uid = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+    if uid.starts_with(b"0") {
+        eprintln!("SKIP: running as root; chmod-based failure simulation unavailable");
+        return;
+    }
+
     let dir = tempdir().expect("temporary directory");
     let pv_path = dir.path().join("pv.txt");
     let cv_path = dir.path().join("cv.txt");
