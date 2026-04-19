@@ -9,16 +9,13 @@ mod render;
 
 use crate::CliError;
 use crate::LoopArgs;
-use crate::MeasuredDt;
 use crate::OutputFormat;
-use crate::apply_measured_dt;
-use crate::build_cv_sink;
-use crate::build_pv_source;
-use crate::emit_state_write_failure;
-use crate::handle_dt_skip_state_write;
-use crate::open_log_optional;
 use crate::print_iteration_json;
-use crate::write_safe_cv;
+use pid_ctl::app::adapters_build::{build_cv_sink, build_pv_source};
+use pid_ctl::app::loop_runtime::{
+    MeasuredDt, apply_measured_dt, emit_state_write_failure, handle_dt_skip_state_write,
+    open_log_optional, write_safe_cv,
+};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -59,7 +56,15 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
         .cv_sink
         .as_ref()
         .map(|cfg| build_cv_sink(cfg, args.cv_precision, args.cmd_timeout));
-    let mut log_file = open_log_optional(args.log_path.as_deref())?;
+    let mut log_file = open_log_optional(args.log_path.as_deref()).map_err(|e| {
+        CliError::new(
+            1,
+            format!(
+                "failed to open log file {}: {e}",
+                args.log_path.as_deref().unwrap().display()
+            ),
+        )
+    })?;
 
     // Bind socket listener when --socket is set.
     let socket_listener = if let Some(ref path) = args.socket_path {
@@ -145,20 +150,17 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
             }
 
             // Service socket connections between ticks.
+            #[cfg(unix)]
             if let Some(ref listener) = socket_listener {
+                use pid_ctl::app::socket_dispatch::{SocketSideEffect, handle_socket_request};
                 for _ in 0..10 {
                     match listener.try_service_one(|req| {
-                        let (resp, effect) = crate::handle_socket_request(
-                            &req,
-                            &mut session,
-                            &mut args,
-                            &mut log_file,
-                        );
+                        let (resp, effect) =
+                            handle_socket_request(&req, &mut session, &mut args, &mut log_file);
                         match effect {
-                            crate::SocketSideEffect::Hold => ui.hold = true,
-                            crate::SocketSideEffect::Resume => ui.hold = false,
-                            crate::SocketSideEffect::IntervalChanged
-                            | crate::SocketSideEffect::None => {}
+                            SocketSideEffect::Hold => ui.hold = true,
+                            SocketSideEffect::Resume => ui.hold = false,
+                            SocketSideEffect::IntervalChanged | SocketSideEffect::None => {}
                         }
                         resp
                     }) {

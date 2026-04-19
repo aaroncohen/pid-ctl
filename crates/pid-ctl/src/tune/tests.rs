@@ -485,7 +485,7 @@ fn test_pid_config() -> pid_ctl_core::PidConfig {
 fn test_loop_args(config: pid_ctl_core::PidConfig) -> super::LoopArgs {
     super::LoopArgs {
         interval: Duration::from_secs(1),
-        pv_source: crate::PvSourceConfig::Literal(0.0),
+        pv_source: pid_ctl::app::adapters_build::PvSourceConfig::Literal(0.0),
         cv_sink: None,
         pid_config: config,
         state_path: None,

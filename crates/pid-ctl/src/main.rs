@@ -5,20 +5,24 @@ mod tune;
 pub(crate) use cli::*;
 
 use clap::Parser;
-use pid_ctl::adapters::{
-    CmdCvSink, CmdPvSource, CvSink, DryRunCvSink, FileCvSink, FilePvSource, PvSource,
-    StdinPvSource, StdoutCvSink,
+use pid_ctl::adapters::{CvSink, DryRunCvSink, StdoutCvSink};
+use pid_ctl::app::adapters_build::{build_cv_sink, build_pv_source};
+use pid_ctl::app::loop_runtime::{
+    MeasuredDt, apply_measured_dt, emit_state_write_failure, flush_state_at_shutdown,
+    handle_dt_skip_state_write, millis_round_u64, open_log_optional, write_safe_cv,
 };
 use pid_ctl::app::{self, ControllerSession, StateSnapshot, StateStore};
 use pid_ctl::json_events;
 use pid_ctl::schedule::next_deadline_after_tick;
-use std::fmt;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use pid_ctl::app::socket_dispatch::{SocketSideEffect, handle_socket_request};
 
 fn main() {
     let full_argv: Vec<String> = std::env::args().collect();
@@ -105,6 +109,18 @@ fn run(
     }
 }
 
+fn open_log(path: Option<&Path>) -> Result<Option<std::fs::File>, CliError> {
+    open_log_optional(path).map_err(|e| {
+        CliError::new(
+            1,
+            format!(
+                "failed to open log file {}: {e}",
+                path.unwrap().display()
+            ),
+        )
+    })
+}
+
 fn run_once(args: &OnceArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
@@ -119,7 +135,7 @@ fn run_once(args: &OnceArgs) -> Result<(), CliError> {
             args.cmd_timeout,
         )
     };
-    let mut log_file = open_log_optional(args.log_path.as_deref())?;
+    let mut log_file = open_log(args.log_path.as_deref())?;
 
     let dt = resolve_once_dt(&session, args, &mut log_file);
 
@@ -171,7 +187,7 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
     let mut sink = StdoutCvSink {
         precision: args.cv_precision,
     };
-    let mut log_file = open_log_optional(args.log_path.as_deref())?;
+    let mut log_file = open_log(args.log_path.as_deref())?;
 
     // Monotonic clock for dt: use elapsed time between lines (plan §dt handling).
     // First line uses args.dt (no prior tick to measure from).
@@ -236,7 +252,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         )
     };
 
-    let mut log_file = open_log_optional(args.log_path.as_deref())?;
+    let mut log_file = open_log(args.log_path.as_deref())?;
 
     // Bind socket listener when --socket is set.
     #[cfg(unix)]
@@ -462,83 +478,6 @@ fn run_loop_tick(
     Ok(())
 }
 
-pub(crate) enum MeasuredDt {
-    Skip,
-    Use(f64),
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
-pub(crate) fn millis_round_u64(ms: f64) -> u64 {
-    let v = ms.round();
-    if !v.is_finite() || v <= 0.0 {
-        return 0;
-    }
-    if v >= u64::MAX as f64 {
-        return u64::MAX;
-    }
-    v as u64
-}
-
-pub(crate) fn open_log_optional(path: Option<&Path>) -> Result<Option<std::fs::File>, CliError> {
-    match path {
-        Some(p) => {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-                .map_err(|error| {
-                    CliError::new(
-                        1,
-                        format!("failed to open log file {}: {error}", p.display()),
-                    )
-                })?;
-            Ok(Some(file))
-        }
-        None => Ok(None),
-    }
-}
-
-/// Applies `--min-dt` / `--max-dt` for measured `dt` in `loop`: skip (default) or clamp (`--dt-clamp`).
-pub(crate) fn apply_measured_dt(
-    raw_dt: f64,
-    min_dt: f64,
-    max_dt: f64,
-    dt_clamp: bool,
-    quiet: bool,
-    log: &mut Option<std::fs::File>,
-) -> MeasuredDt {
-    if raw_dt >= min_dt && raw_dt <= max_dt {
-        return MeasuredDt::Use(raw_dt);
-    }
-
-    if dt_clamp {
-        let clamped = raw_dt.clamp(min_dt, max_dt);
-        if !quiet {
-            if raw_dt < min_dt {
-                eprintln!("dt {raw_dt:.6}s below min_dt {min_dt:.6}s — clamping to min_dt");
-            } else {
-                eprintln!("dt {raw_dt:.6}s exceeds max_dt {max_dt:.6}s — clamping to max_dt");
-            }
-        }
-        json_events::emit_dt_clamped(log, raw_dt, clamped);
-        MeasuredDt::Use(clamped)
-    } else {
-        if !quiet {
-            if raw_dt < min_dt {
-                eprintln!("dt {raw_dt:.6}s below min_dt {min_dt:.6}s — skipping tick");
-            } else {
-                eprintln!("dt {raw_dt:.6}s exceeds max_dt {max_dt:.6}s — skipping tick");
-            }
-        }
-        json_events::emit_dt_skipped(log, raw_dt, min_dt, max_dt);
-        MeasuredDt::Skip
-    }
-}
-
 fn resolve_once_dt(
     session: &ControllerSession,
     args: &OnceArgs,
@@ -579,266 +518,6 @@ fn clamp_once_wall_clock_dt(
     raw
 }
 
-/// Writes the safe CV when configured; on success, records it as the last confirmed-applied CV.
-pub(crate) fn write_safe_cv(
-    safe_cv: Option<f64>,
-    cv_sink: &mut dyn CvSink,
-    session: &mut ControllerSession,
-) {
-    if let Some(cv) = safe_cv
-        && cv_sink.write_cv(cv).is_ok()
-        && let Some(err) = session.record_confirmed_cv(cv)
-    {
-        eprintln!("state write failed: {err}");
-    }
-}
-
-/// Applies a new loop interval at runtime, updating derived defaults (`max_dt`,
-/// `pv_stdin_timeout`, `state_write_interval`) unless the user set them explicitly.
-#[allow(clippy::unnecessary_wraps)]
-pub(crate) fn apply_runtime_interval(
-    session: &mut ControllerSession,
-    args: &mut LoopArgs,
-    new_interval: Duration,
-) -> Result<(), CliError> {
-    args.interval = new_interval;
-    let s = new_interval.as_secs_f64();
-    if !args.explicit_max_dt {
-        args.max_dt = (s * 3.0_f64).clamp(0.01, 60.0);
-    }
-    if !args.explicit_pv_stdin_timeout {
-        args.pv_stdin_timeout = new_interval;
-    }
-    if !args.explicit_state_write_interval {
-        let min_flush = Duration::from_millis(100);
-        args.state_write_interval = Some(new_interval.max(min_flush));
-    }
-    session.set_flush_interval(args.state_write_interval);
-    Ok(())
-}
-
-#[cfg(unix)]
-/// Side effects that a socket command may request the loop to apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SocketSideEffect {
-    None,
-    Hold,
-    Resume,
-    IntervalChanged,
-}
-
-#[cfg(unix)]
-/// Dispatches a socket [`Request`] against the live controller session and
-/// returns a JSON [`Response`] plus any side effect for the loop to apply.
-pub(crate) fn handle_socket_request(
-    req: &pid_ctl::socket::Request,
-    session: &mut ControllerSession,
-    args: &mut LoopArgs,
-    log_file: &mut Option<std::fs::File>,
-) -> (pid_ctl::socket::Response, SocketSideEffect) {
-    use pid_ctl::socket::{Request, Response};
-
-    match req {
-        Request::Status => {
-            let cfg = session.config();
-            (
-                Response::Status {
-                    ok: true,
-                    iter: session.iter(),
-                    pv: session.last_pv().unwrap_or(0.0),
-                    sp: cfg.setpoint,
-                    err: session.last_error().unwrap_or(0.0),
-                    kp: cfg.kp,
-                    ki: cfg.ki,
-                    kd: cfg.kd,
-                    cv: session.last_applied_cv().unwrap_or(0.0),
-                    i_acc: session.i_acc(),
-                },
-                SocketSideEffect::None,
-            )
-        }
-        Request::Set { param, value } => handle_socket_set(param, *value, session, args, log_file),
-        Request::Reset => {
-            let i_acc_before = session.i_acc();
-            session.reset_integral();
-            json_events::emit_integral_reset(log_file, i_acc_before, session.iter(), "socket");
-            (
-                Response::Reset {
-                    ok: true,
-                    i_acc_before,
-                },
-                SocketSideEffect::None,
-            )
-        }
-        Request::Hold => (
-            Response::Ack {
-                ok: true,
-                error: None,
-            },
-            SocketSideEffect::Hold,
-        ),
-        Request::Resume => (
-            Response::Ack {
-                ok: true,
-                error: None,
-            },
-            SocketSideEffect::Resume,
-        ),
-        Request::Save => {
-            if !session.has_state_store() {
-                return (
-                    Response::Ack {
-                        ok: false,
-                        error: Some(String::from(
-                            "no state store: loop was not started with --state",
-                        )),
-                    },
-                    SocketSideEffect::None,
-                );
-            }
-            if let Some(err) = session.force_flush() {
-                (
-                    Response::Ack {
-                        ok: false,
-                        error: Some(format!("save failed: {err}")),
-                    },
-                    SocketSideEffect::None,
-                )
-            } else {
-                (
-                    Response::Ack {
-                        ok: true,
-                        error: None,
-                    },
-                    SocketSideEffect::None,
-                )
-            }
-        }
-    }
-}
-
-/// Apply a single gain parameter (kp/ki/kd) to the session and emit the change event.
-/// Returns the old value. Gains are ordered [kp, ki, kd] throughout.
-#[cfg(unix)]
-fn apply_gain_param(
-    param: &str,
-    value: f64,
-    session: &mut ControllerSession,
-    log_file: &mut Option<std::fs::File>,
-) -> f64 {
-    // gains[0]=kp, gains[1]=ki, gains[2]=kd
-    let idx = match param {
-        "kp" => 0usize,
-        "ki" => 1,
-        "kd" => 2,
-        _ => unreachable!("apply_gain_param called with non-gain param: {param}"),
-    };
-    let cfg = session.config();
-    let mut gains = [cfg.kp, cfg.ki, cfg.kd];
-    let old = gains[idx];
-    gains[idx] = value;
-    session.set_gains(gains[0], gains[1], gains[2]);
-    json_events::emit_gains_changed(
-        log_file,
-        session.config().kp,
-        session.config().ki,
-        session.config().kd,
-        session.config().setpoint,
-        session.iter(),
-        "socket",
-    );
-    old
-}
-
-#[cfg(unix)]
-fn handle_socket_set(
-    param: &str,
-    value: f64,
-    session: &mut ControllerSession,
-    args: &mut LoopArgs,
-    log_file: &mut Option<std::fs::File>,
-) -> (pid_ctl::socket::Response, SocketSideEffect) {
-    use pid_ctl::socket::Response;
-
-    let settable = || {
-        vec![
-            String::from("kp"),
-            String::from("ki"),
-            String::from("kd"),
-            String::from("sp"),
-            String::from("interval"),
-        ]
-    };
-
-    match param {
-        "kp" | "ki" | "kd" => {
-            let old = apply_gain_param(param, value, session, log_file);
-            (
-                Response::Set {
-                    ok: true,
-                    param: param.to_string(),
-                    old,
-                    new: value,
-                },
-                SocketSideEffect::None,
-            )
-        }
-        "sp" => {
-            let old = session.config().setpoint;
-            session.set_setpoint(value);
-            json_events::emit_gains_changed(
-                log_file,
-                session.config().kp,
-                session.config().ki,
-                session.config().kd,
-                value,
-                session.iter(),
-                "socket",
-            );
-            (
-                Response::Set {
-                    ok: true,
-                    param: String::from("sp"),
-                    old,
-                    new: value,
-                },
-                SocketSideEffect::None,
-            )
-        }
-        "interval" => {
-            let old = args.interval.as_secs_f64();
-            let new_interval = Duration::from_secs_f64(value);
-            if let Err(e) = apply_runtime_interval(session, args, new_interval) {
-                return (
-                    Response::ErrorUnknownCommand {
-                        ok: false,
-                        error: format!("interval change failed: {e}"),
-                        available: vec![],
-                    },
-                    SocketSideEffect::None,
-                );
-            }
-            (
-                Response::Set {
-                    ok: true,
-                    param: String::from("interval"),
-                    old,
-                    new: value,
-                },
-                SocketSideEffect::IntervalChanged,
-            )
-        }
-        _ => (
-            Response::ErrorUnknownParam {
-                ok: false,
-                error: format!("unknown parameter: {param}"),
-                settable: settable(),
-            },
-            SocketSideEffect::None,
-        ),
-    }
-}
-
 #[cfg(unix)]
 /// Sleeps until `until` in 50ms chunks, servicing socket connections between chunks.
 fn sleep_with_socket(
@@ -871,97 +550,6 @@ fn sleep_with_socket(
                 Ok(Some(())) => {}
                 _ => break,
             }
-        }
-    }
-}
-
-/// Handles a state write failure that occurred during a dt-skip, applying escalation logic.
-pub(crate) fn handle_dt_skip_state_write(
-    err: Option<pid_ctl::app::StateStoreError>,
-    session: &ControllerSession,
-    state_path: Option<&std::path::PathBuf>,
-    log_file: &mut Option<std::fs::File>,
-    quiet: bool,
-) {
-    let Some(err) = err else {
-        return;
-    };
-    emit_state_write_failure(session, state_path, log_file, &err, quiet);
-}
-
-/// Emits a state write failure — escalated warning if threshold reached, plain log otherwise.
-pub(crate) fn emit_state_write_failure(
-    session: &ControllerSession,
-    state_path: Option<&std::path::PathBuf>,
-    log_file: &mut Option<std::fs::File>,
-    err: &pid_ctl::app::StateStoreError,
-    quiet: bool,
-) {
-    if let Some(path) = state_path {
-        if session.state_fail_escalated() {
-            let count = session.state_fail_count();
-            if !quiet {
-                eprintln!("WARNING: state write failing persistently ({count} consecutive): {err}");
-            }
-            json_events::emit_state_write_escalated(log_file, path.clone(), err.to_string(), count);
-        } else {
-            if !quiet {
-                eprintln!("state write failed: {err}");
-            }
-            json_events::emit_state_write_failed(log_file, path.clone(), err.to_string());
-        }
-    } else if !quiet {
-        eprintln!("state write failed: {err}");
-    }
-}
-
-/// Forces a final state flush at loop shutdown, logging any failure.
-fn flush_state_at_shutdown(
-    session: &mut ControllerSession,
-    state_path: Option<&std::path::PathBuf>,
-    log_file: &mut Option<std::fs::File>,
-) {
-    if let Some(err) = session.force_flush() {
-        eprintln!("state write failed at shutdown: {err}");
-        if let Some(path) = state_path {
-            json_events::emit_state_write_failed(log_file, path.clone(), err.to_string());
-        }
-    }
-}
-
-pub(crate) fn build_pv_source(
-    source: &PvSourceConfig,
-    cmd_timeout: Duration,
-    pv_stdin_timeout: Duration,
-) -> Box<dyn PvSource> {
-    match source {
-        PvSourceConfig::Literal(_) => unreachable!("loop rejects literal PV"),
-        PvSourceConfig::File(path) => Box::new(FilePvSource::new(path.clone())),
-        PvSourceConfig::Cmd(cmd) => Box::new(CmdPvSource::new(cmd.clone(), cmd_timeout)),
-        PvSourceConfig::Stdin => Box::new(StdinPvSource::new(pv_stdin_timeout)),
-    }
-}
-
-pub(crate) fn build_cv_sink(
-    cv_sink: &CvSinkConfig,
-    precision: usize,
-    default_cmd_timeout: Duration,
-) -> Box<dyn CvSink> {
-    match cv_sink {
-        CvSinkConfig::Stdout => Box::new(StdoutCvSink { precision }),
-        CvSinkConfig::File { path, verify } => {
-            let mut sink = FileCvSink::new(path.clone());
-            sink.precision = precision;
-            sink.verify = *verify;
-            Box::new(sink)
-        }
-        CvSinkConfig::Cmd { command, timeout } => {
-            let effective_timeout = timeout.unwrap_or(default_cmd_timeout);
-            Box::new(CmdCvSink::new(
-                command.clone(),
-                effective_timeout,
-                precision,
-            ))
         }
     }
 }
@@ -1177,27 +765,3 @@ fn run_socket_set(raw: &SetRawArgs) -> Result<(), CliError> {
     socket_send_and_print(&parsed.socket_path, &req, "set")
 }
 
-#[derive(Debug)]
-pub(crate) struct CliError {
-    exit_code: i32,
-    message: String,
-}
-
-impl CliError {
-    fn new(exit_code: i32, message: impl Into<String>) -> Self {
-        Self {
-            exit_code,
-            message: message.into(),
-        }
-    }
-
-    fn config(message: impl Into<String>) -> Self {
-        Self::new(3, message)
-    }
-}
-
-impl fmt::Display for CliError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}

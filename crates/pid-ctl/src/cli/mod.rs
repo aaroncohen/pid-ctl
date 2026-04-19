@@ -1,7 +1,9 @@
+mod error;
 mod parse;
 mod raw;
 mod types;
 
+pub(crate) use error::CliError;
 #[cfg(unix)]
 pub(crate) use parse::{get_socket_path, parse_set_args};
 pub(crate) use parse::{
@@ -11,6 +13,4 @@ pub(crate) use parse::{
 pub(crate) use raw::{Cli, SubCommand};
 #[cfg(unix)]
 pub(crate) use raw::{SetRawArgs, SocketOnlyArgs};
-pub(crate) use types::{
-    CvSinkConfig, LoopArgs, OnceArgs, OutputFormat, PipeArgs, PvSourceConfig, StatusFlags,
-};
+pub(crate) use types::{LoopArgs, OnceArgs, OutputFormat, PipeArgs, StatusFlags};
