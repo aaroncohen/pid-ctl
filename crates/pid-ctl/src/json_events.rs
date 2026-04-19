@@ -174,11 +174,7 @@ impl PvReadFailureEvent {
     }
 }
 
-pub fn emit_pv_read_failure(
-    logger: &mut Logger,
-    error: impl Into<String>,
-    safe_cv: Option<f64>,
-) {
+pub fn emit_pv_read_failure(logger: &mut Logger, error: impl Into<String>, safe_cv: Option<f64>) {
     emit_line(logger, &PvReadFailureEvent::new(error, safe_cv));
 }
 
@@ -215,11 +211,7 @@ pub const fn reason_str(reason: pid_ctl_core::DTermSkipReason) -> &'static str {
     }
 }
 
-pub fn emit_d_term_skipped(
-    logger: &mut Logger,
-    reason: pid_ctl_core::DTermSkipReason,
-    iter: u64,
-) {
+pub fn emit_d_term_skipped(logger: &mut Logger, reason: pid_ctl_core::DTermSkipReason, iter: u64) {
     emit_line(logger, &DTermSkippedEvent::new(reason_str(reason), iter));
 }
 

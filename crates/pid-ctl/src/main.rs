@@ -464,11 +464,7 @@ fn run_loop_tick(
     Ok(())
 }
 
-fn resolve_once_dt(
-    session: &ControllerSession,
-    args: &OnceArgs,
-    logger: &mut Logger,
-) -> f64 {
+fn resolve_once_dt(session: &ControllerSession, args: &OnceArgs, logger: &mut Logger) -> f64 {
     if args.dt_explicit {
         return args.dt;
     }
@@ -482,12 +478,7 @@ fn resolve_once_dt(
         })
 }
 
-fn clamp_once_wall_clock_dt(
-    raw: f64,
-    min_dt: f64,
-    max_dt: f64,
-    logger: &mut Logger,
-) -> f64 {
+fn clamp_once_wall_clock_dt(raw: f64, min_dt: f64, max_dt: f64, logger: &mut Logger) -> f64 {
     let raw = raw.max(0.0);
     if raw < min_dt {
         eprintln!("once: wall-clock dt {raw:.6}s below --min-dt {min_dt:.6}s — clamping to min_dt");

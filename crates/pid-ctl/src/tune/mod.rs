@@ -239,11 +239,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                 }
                 Err(error) => {
                     pv_fail_count += 1;
-                    json_events::emit_pv_read_failure(
-                        &mut logger,
-                        error.to_string(),
-                        args.safe_cv,
-                    );
+                    json_events::emit_pv_read_failure(&mut logger, error.to_string(), args.safe_cv);
                     if let Some(ref mut sink) = hardware {
                         write_safe_cv(args.safe_cv, sink.as_mut(), &mut session);
                     }
