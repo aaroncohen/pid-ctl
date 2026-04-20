@@ -3,6 +3,7 @@
 pub mod adapters_build;
 pub mod logger;
 pub mod loop_runtime;
+pub mod snapshot_persister;
 #[cfg(unix)]
 pub mod socket_dispatch;
 pub mod state_store;
@@ -13,9 +14,10 @@ use pid_ctl_core::{ConfigError, PidConfig, PidController, StepInput, StepResult}
 use serde::Serialize;
 use std::error::Error;
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use time::format_description::well_known::Rfc3339;
 
+pub use snapshot_persister::SnapshotPersister;
 pub use state_store::{
     STATE_SCHEMA_VERSION, StateLock, StateSnapshot, StateStore, StateStoreError,
 };
@@ -63,16 +65,7 @@ pub struct HoldTickOutcome {
 pub struct ControllerSession {
     controller: PidController,
     snapshot: StateSnapshot,
-    state_store: Option<StateStore>,
-    _state_lock: Option<StateLock>,
-    /// Maximum interval between disk flushes. `None` = flush every call.
-    flush_interval: Option<Duration>,
-    /// Monotonic instant of the last successful (or attempted) flush.
-    last_flush: Option<Instant>,
-    /// Consecutive state write failures since last success.
-    state_fail_count: u32,
-    /// Threshold after which failures escalate to a prominent per-cycle warning.
-    state_fail_after: u32,
+    persister: SnapshotPersister,
 }
 
 impl ControllerSession {
@@ -106,15 +99,17 @@ impl ControllerSession {
             snapshot.name.clone(),
         ));
 
+        let persister = SnapshotPersister::new(
+            state_store,
+            state_lock,
+            config.flush_interval,
+            config.state_fail_after,
+        );
+
         Ok(Self {
             controller,
             snapshot,
-            state_store,
-            _state_lock: state_lock,
-            flush_interval: config.flush_interval,
-            last_flush: None,
-            state_fail_count: 0,
-            state_fail_after: config.state_fail_after,
+            persister,
         })
     }
 
@@ -173,8 +168,8 @@ impl ControllerSession {
     }
 
     /// Updates coalesced state flush cadence (used when `--interval` changes at runtime).
-    pub const fn set_flush_interval(&mut self, flush_interval: Option<Duration>) {
-        self.flush_interval = flush_interval;
+    pub fn set_flush_interval(&mut self, flush_interval: Option<Duration>) {
+        self.persister.set_flush_interval(flush_interval);
     }
 
     fn sync_pid_fields_from_controller(&mut self) {
@@ -292,75 +287,34 @@ impl ControllerSession {
         }
     }
 
-    /// Writes the current snapshot to disk, respecting `flush_interval` coalescing.
-    ///
-    /// When `flush_interval` is set, skips the write if not enough time has
-    /// elapsed since the last flush. In-memory state is always current regardless.
-    ///
-    /// Updates `state_fail_count` on failure / success for escalation tracking.
     fn persist_snapshot(&mut self) -> Result<(), StateStoreError> {
-        let Some(state_store) = &self.state_store else {
-            return Ok(());
-        };
-
-        // Coalescing: skip disk write if within the flush interval.
-        if let (Some(interval), Some(last)) = (self.flush_interval, self.last_flush)
-            && last.elapsed() < interval
-        {
-            return Ok(());
-        }
-
-        let result = state_store.save(&self.snapshot);
-        match &result {
-            Ok(()) => {
-                self.state_fail_count = 0;
-                self.last_flush = Some(Instant::now());
-            }
-            Err(_) => {
-                self.state_fail_count = self.state_fail_count.saturating_add(1);
-            }
-        }
-        result
+        self.persister.persist(&self.snapshot)
     }
 
     /// Forces a disk flush regardless of `flush_interval`.
     ///
     /// Used at shutdown to ensure the final in-memory state is persisted.
-    /// Updates `state_fail_count` on failure / success.
     pub fn force_flush(&mut self) -> Option<StateStoreError> {
-        let Some(state_store) = &self.state_store else {
-            return None;
-        };
-        match state_store.save(&self.snapshot) {
-            Ok(()) => {
-                self.state_fail_count = 0;
-                self.last_flush = Some(Instant::now());
-                None
-            }
-            Err(e) => {
-                self.state_fail_count = self.state_fail_count.saturating_add(1);
-                Some(e)
-            }
-        }
+        self.persister.force_flush(&self.snapshot)
     }
 
     /// Returns `true` when the number of consecutive state write failures has
     /// reached the escalation threshold (`--state-fail-after`).
     #[must_use]
-    pub const fn state_fail_escalated(&self) -> bool {
-        self.state_fail_count >= self.state_fail_after && self.state_fail_after > 0
+    pub fn state_fail_escalated(&self) -> bool {
+        self.persister.fail_escalated()
     }
 
     /// Returns the current consecutive state write failure count.
     #[must_use]
-    pub const fn state_fail_count(&self) -> u32 {
-        self.state_fail_count
+    pub fn state_fail_count(&self) -> u32 {
+        self.persister.fail_count()
     }
 
     /// Returns `true` if this session was created with a `--state` path (i.e. persistence is active).
     #[must_use]
-    pub const fn has_state_store(&self) -> bool {
-        self.state_store.is_some()
+    pub fn has_state_store(&self) -> bool {
+        self.persister.has_store()
     }
 
     /// Holds the last CV at the actuator without advancing PID state or `iter` (operator hold).
