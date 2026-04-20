@@ -12,7 +12,8 @@ use pid_ctl::app::loop_runtime::{
     MeasuredDt, apply_measured_dt, emit_state_write_failure, flush_state_at_shutdown,
     handle_dt_skip_state_write, millis_round_u64, write_safe_cv,
 };
-use pid_ctl::app::{self, ControllerSession, StateSnapshot, StateStore};
+use pid_ctl::app::ticker::{self, TickContext, TickObserver, TickStepResult};
+use pid_ctl::app::{self, ControllerSession, StateSnapshot, StateStore, TickError, TickOutcome};
 use pid_ctl::json_events;
 use pid_ctl::schedule::next_deadline_after_tick;
 use std::io::{self, BufRead, Write};
@@ -213,7 +214,7 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
         if let Some(error) = outcome.state_write_failed {
             emit_state_write_failure(
                 &session,
-                args.state_path.as_ref(),
+                args.state_path.as_deref(),
                 &mut logger,
                 &error,
                 false,
@@ -279,7 +280,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         // Check shutdown flag at top of each iteration.
         if shutdown.load(Ordering::Relaxed) {
             write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
-            flush_state_at_shutdown(&mut session, args.state_path.as_ref(), &mut logger);
+            flush_state_at_shutdown(&mut session, args.state_path.as_deref(), &mut logger);
             break;
         }
 
@@ -307,7 +308,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         // Check shutdown again after sleeping (signal may have arrived during sleep).
         if shutdown.load(Ordering::Relaxed) {
             write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
-            flush_state_at_shutdown(&mut session, args.state_path.as_ref(), &mut logger);
+            flush_state_at_shutdown(&mut session, args.state_path.as_deref(), &mut logger);
             break;
         }
 
@@ -351,7 +352,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
                 handle_dt_skip_state_write(
                     session.on_dt_skipped(),
                     &session,
-                    args.state_path.as_ref(),
+                    args.state_path.as_deref(),
                     &mut logger,
                     args.quiet,
                 );
@@ -384,84 +385,60 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
             }
         };
 
-        run_loop_tick(
-            args,
-            raw_pv,
+        let mut observer = LoopObserver {
+            output_format: args.output_format,
+            verbose: args.verbose,
+            cv_fail_after: args.cv_fail_after,
+        };
+        let ctx = TickContext {
+            scaled_pv: raw_pv * args.scale,
             dt,
-            &mut session,
-            cv_sink.as_mut(),
-            &mut logger,
-            &mut cv_fail_count,
-        )?;
+            session: &mut session,
+            cv_sink: cv_sink.as_mut(),
+            logger: &mut logger,
+            state_path: args.state_path.as_deref(),
+            cv_fail_after: args.cv_fail_after,
+            safe_cv: args.safe_cv,
+            quiet: args.quiet,
+        };
+        if let TickStepResult::CvFailExhausted(msg) =
+            ticker::step(ctx, &mut cv_fail_count, &mut observer)
+        {
+            return Err(CliError::new(2, msg));
+        }
     }
 
     Ok(())
 }
 
-/// Executes one PID tick: computes CV, writes to sink, logs outcome.
-///
-/// Returns `Err` when CV write failures exceed the configured limit.
-fn run_loop_tick(
-    args: &LoopArgs,
-    raw_pv: f64,
-    dt: f64,
-    session: &mut ControllerSession,
-    cv_sink: &mut dyn CvSink,
-    logger: &mut Logger,
-    cv_fail_count: &mut u32,
-) -> Result<(), CliError> {
-    let scaled_pv = raw_pv * args.scale;
+struct LoopObserver {
+    output_format: OutputFormat,
+    verbose: bool,
+    cv_fail_after: u32,
+}
 
-    match session.process_pv(scaled_pv, dt, cv_sink) {
-        Ok(outcome) => {
-            *cv_fail_count = 0;
-
-            if let Some(reason) = outcome.d_term_skipped {
-                json_events::emit_d_term_skipped(logger, reason, outcome.record.iter);
-            }
-
-            if matches!(args.output_format, OutputFormat::Json)
-                && let Err(error) = print_iteration_json(&outcome.record)
-            {
-                eprintln!("output write failed: {error}");
-            }
-
-            logger.write_iteration_line(&outcome.record);
-
-            if args.verbose {
-                let r = &outcome.record;
-                eprintln!(
-                    "iter={} pv={:.4} sp={:.4} err={:.4} cv={:.4} p={:.4} i={:.4} d={:.4}",
-                    r.iter, r.pv, r.sp, r.err, r.cv, r.p, r.i, r.d
-                );
-            }
-
-            if let Some(error) = outcome.state_write_failed {
-                emit_state_write_failure(
-                    session,
-                    args.state_path.as_ref(),
-                    logger,
-                    &error,
-                    args.quiet,
-                );
-            }
+impl TickObserver for LoopObserver {
+    fn on_success(&mut self, outcome: &TickOutcome) {
+        if matches!(self.output_format, OutputFormat::Json)
+            && let Err(error) = print_iteration_json(&outcome.record)
+        {
+            eprintln!("output write failed: {error}");
         }
-        Err(error) => {
-            *cv_fail_count += 1;
-            let limit = args.cv_fail_after;
-            eprintln!("CV write failed ({cv_fail_count}/{limit}): {error}");
-            json_events::emit_cv_write_failed(logger, error.to_string(), *cv_fail_count);
-            if *cv_fail_count >= limit {
-                write_safe_cv(args.safe_cv, cv_sink, session);
-                return Err(CliError::new(
-                    2,
-                    format!("exiting after {cv_fail_count} consecutive CV write failures: {error}"),
-                ));
-            }
+        if self.verbose {
+            let r = &outcome.record;
+            eprintln!(
+                "iter={} pv={:.4} sp={:.4} err={:.4} cv={:.4} p={:.4} i={:.4} d={:.4}",
+                r.iter, r.pv, r.sp, r.err, r.cv, r.p, r.i, r.d
+            );
         }
     }
 
-    Ok(())
+    fn on_cv_fail(&mut self, error: &TickError, consecutive: u32) {
+        eprintln!(
+            "CV write failed ({consecutive}/{}): {error}",
+            self.cv_fail_after
+        );
+    }
 }
 
 fn resolve_once_dt(session: &ControllerSession, args: &OnceArgs, logger: &mut Logger) -> f64 {

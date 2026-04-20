@@ -26,7 +26,8 @@ use pid_ctl::app::loop_runtime::{
     MeasuredDt, apply_measured_dt, emit_state_write_failure, handle_dt_skip_state_write,
     write_safe_cv,
 };
-use pid_ctl::app::{ControllerSession, TickOutcome};
+use pid_ctl::app::ticker::{self, TickContext, TickObserver, TickStepResult};
+use pid_ctl::app::{ControllerSession, TickError, TickOutcome};
 use pid_ctl::json_events;
 use pid_ctl::schedule::next_deadline_after_tick;
 use ratatui::Terminal;
@@ -214,7 +215,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                     handle_dt_skip_state_write(
                         session.on_dt_skipped(),
                         &session,
-                        args.state_path.as_ref(),
+                        args.state_path.as_deref(),
                         &mut logger,
                         false,
                     );
@@ -288,7 +289,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                         if let Some(e) = h.state_write_failed {
                             emit_state_write_failure(
                                 &session,
-                                args.state_path.as_ref(),
+                                args.state_path.as_deref(),
                                 &mut logger,
                                 &e,
                                 false,
@@ -315,16 +316,22 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                         }
                     }
                 };
-                match tune_tick(
-                    &args,
-                    raw_pv,
+                let mut observer = TuneObserver {
+                    output_format: args.output_format,
+                };
+                let ctx = TickContext {
+                    scaled_pv,
                     dt,
-                    &mut session,
-                    active,
-                    &mut logger,
-                    &mut cv_fail_count,
-                ) {
-                    Ok(Some(outcome)) => {
+                    session: &mut session,
+                    cv_sink: active,
+                    logger: &mut logger,
+                    state_path: args.state_path.as_deref(),
+                    cv_fail_after: args.cv_fail_after,
+                    safe_cv: args.safe_cv,
+                    quiet: false,
+                };
+                match ticker::step(ctx, &mut cv_fail_count, &mut observer) {
+                    TickStepResult::Ok(outcome) => {
                         ui.last_record = Some(outcome.record.clone());
                         if let Ok(sz) = terminal.size() {
                             ui.spark_w = sz.width.saturating_sub(4) as usize;
@@ -336,8 +343,8 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                             session.config().setpoint,
                         );
                     }
-                    Ok(None) => {}
-                    Err(e) => return Err(e),
+                    TickStepResult::CvFailTransient { .. } => {}
+                    TickStepResult::CvFailExhausted(msg) => return Err(CliError::new(2, msg)),
                 }
             }
 
@@ -360,51 +367,19 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
     run_result
 }
 
-/// Like `run_loop_tick` but returns the outcome for the dashboard; skips JSON on stdout (TUI owns the screen).
-fn tune_tick(
-    args: &LoopArgs,
-    raw_pv: f64,
-    dt: f64,
-    session: &mut ControllerSession,
-    cv_sink: &mut dyn CvSink,
-    logger: &mut Logger,
-    cv_fail_count: &mut u32,
-) -> Result<Option<TickOutcome>, CliError> {
-    let scaled_pv = raw_pv * args.scale;
+struct TuneObserver {
+    output_format: OutputFormat,
+}
 
-    match session.process_pv(scaled_pv, dt, cv_sink) {
-        Ok(outcome) => {
-            *cv_fail_count = 0;
-
-            if let Some(reason) = outcome.d_term_skipped {
-                json_events::emit_d_term_skipped(logger, reason, outcome.record.iter);
-            }
-
-            if matches!(args.output_format, OutputFormat::Json) {
-                let _ = print_iteration_json(&outcome.record);
-            }
-
-            logger.write_iteration_line(&outcome.record);
-
-            if let Some(ref error) = outcome.state_write_failed {
-                emit_state_write_failure(session, args.state_path.as_ref(), logger, error, false);
-            }
-
-            Ok(Some(outcome))
+impl TickObserver for TuneObserver {
+    fn on_success(&mut self, outcome: &TickOutcome) {
+        if matches!(self.output_format, OutputFormat::Json) {
+            let _ = print_iteration_json(&outcome.record);
         }
-        Err(error) => {
-            *cv_fail_count += 1;
-            let limit = args.cv_fail_after;
-            json_events::emit_cv_write_failed(logger, error.to_string(), *cv_fail_count);
-            if *cv_fail_count >= limit {
-                write_safe_cv(args.safe_cv, cv_sink, session);
-                return Err(CliError::new(
-                    2,
-                    format!("exiting after {cv_fail_count} consecutive CV write failures: {error}"),
-                ));
-            }
-            Ok(None)
-        }
+    }
+
+    fn on_cv_fail(&mut self, _error: &TickError, _consecutive: u32) {
+        // TUI owns the screen; no per-failure eprintln.
     }
 }
 

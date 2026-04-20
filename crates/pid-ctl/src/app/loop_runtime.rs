@@ -5,7 +5,7 @@ use crate::adapters::CvSink;
 use crate::app::logger::Logger;
 use crate::app::{ControllerSession, StateStoreError};
 use crate::json_events;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
 pub enum MeasuredDt {
@@ -114,7 +114,7 @@ pub fn write_safe_cv(
 pub fn handle_dt_skip_state_write(
     err: Option<StateStoreError>,
     session: &ControllerSession,
-    state_path: Option<&PathBuf>,
+    state_path: Option<&Path>,
     logger: &mut Logger,
     quiet: bool,
 ) {
@@ -127,7 +127,7 @@ pub fn handle_dt_skip_state_write(
 /// Emits a state write failure — escalated warning if threshold reached, plain log otherwise.
 pub fn emit_state_write_failure(
     session: &ControllerSession,
-    state_path: Option<&PathBuf>,
+    state_path: Option<&Path>,
     logger: &mut Logger,
     err: &StateStoreError,
     quiet: bool,
@@ -138,12 +138,17 @@ pub fn emit_state_write_failure(
             if !quiet {
                 eprintln!("WARNING: state write failing persistently ({count} consecutive): {err}");
             }
-            json_events::emit_state_write_escalated(logger, path.clone(), err.to_string(), count);
+            json_events::emit_state_write_escalated(
+                logger,
+                path.to_path_buf(),
+                err.to_string(),
+                count,
+            );
         } else {
             if !quiet {
                 eprintln!("state write failed: {err}");
             }
-            json_events::emit_state_write_failed(logger, path.clone(), err.to_string());
+            json_events::emit_state_write_failed(logger, path.to_path_buf(), err.to_string());
         }
     } else if !quiet {
         eprintln!("state write failed: {err}");
@@ -153,13 +158,13 @@ pub fn emit_state_write_failure(
 /// Forces a final state flush at loop shutdown, logging any failure.
 pub fn flush_state_at_shutdown(
     session: &mut ControllerSession,
-    state_path: Option<&PathBuf>,
+    state_path: Option<&Path>,
     logger: &mut Logger,
 ) {
     if let Some(err) = session.force_flush() {
         eprintln!("state write failed at shutdown: {err}");
         if let Some(path) = state_path {
-            json_events::emit_state_write_failed(logger, path.clone(), err.to_string());
+            json_events::emit_state_write_failed(logger, path.to_path_buf(), err.to_string());
         }
     }
 }
