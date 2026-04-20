@@ -3,6 +3,7 @@ use super::types::{
     CvSinkConfig, LoopArgs, OnceArgs, OutputFormat, PidFlags, PipeArgs, PvSourceConfig, SetArgs,
     StatusFlags,
 };
+use super::user_set::UserSet;
 use crate::CliError;
 use pid_ctl::adapters::{CmdPvSource, FilePvSource, PvSource};
 use pid_ctl::app::StateStore;
@@ -260,8 +261,10 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
     // Ensure max_dt_default is never below min_dt default (0.01).
     let max_dt_default = max_dt_default.max(0.01);
 
-    let pv_stdin_timeout = raw.pv.pv_stdin_timeout.unwrap_or(interval);
-    let explicit_pv_stdin_timeout = raw.pv.pv_stdin_timeout.is_some();
+    let pv_stdin_timeout = raw
+        .pv
+        .pv_stdin_timeout
+        .map_or_else(|| UserSet::Default(interval), UserSet::Explicit);
 
     // Default cmd-timeout: min(interval, 30s).
     let effective_cmd_timeout = raw.common.cmd_timeout.map_or_else(
@@ -273,18 +276,12 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
         .pv_cmd_timeout
         .map_or(effective_cmd_timeout, Duration::from_secs_f64);
 
-    // explicit_* track whether user explicitly set these so runtime interval changes don't override.
-    let explicit_min_dt = raw.common.min_dt.is_some();
-    let explicit_max_dt = raw.common.max_dt.is_some();
-    let explicit_state_write_interval = raw.common.state_write_interval.is_some();
-
     // Default state_write_interval for loop: max(tick_interval, 100ms).
     let min_flush = Duration::from_millis(100);
     let default_state_write_interval = interval.max(min_flush);
-    let state_write_interval = Some(
-        raw.common
-            .state_write_interval
-            .unwrap_or(default_state_write_interval),
+    let state_write_interval = raw.common.state_write_interval.map_or_else(
+        || UserSet::Default(Some(default_state_write_interval)),
+        |t| UserSet::Explicit(Some(t)),
     );
 
     let (dt, _dt_explicit) = if let Some(v) = raw.common.dt {
@@ -316,8 +313,14 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
         safe_cv: raw.common.safe_cv,
         cv_fail_after: raw.common.cv_fail_after.unwrap_or(10),
         fail_after: raw.common.fail_after,
-        min_dt: raw.common.min_dt.unwrap_or(0.01),
-        max_dt: raw.common.max_dt.unwrap_or(max_dt_default),
+        min_dt: raw
+            .common
+            .min_dt
+            .map_or_else(|| UserSet::Default(0.01), UserSet::Explicit),
+        max_dt: raw
+            .common
+            .max_dt
+            .map_or_else(|| UserSet::Default(max_dt_default), UserSet::Explicit),
         dt_clamp: raw.common.dt_clamp,
         log_path: raw.common.log.clone(),
         dry_run: raw.dry_run,
@@ -334,10 +337,6 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
         units: raw.common.units.clone(),
         quiet: raw.common.quiet,
         verbose: raw.common.verbose,
-        explicit_max_dt,
-        explicit_min_dt,
-        explicit_pv_stdin_timeout,
-        explicit_state_write_interval,
         #[cfg(unix)]
         socket_path,
         #[cfg(unix)]

@@ -2,6 +2,7 @@ mod error;
 mod parse;
 mod raw;
 mod types;
+pub(crate) mod user_set;
 
 pub(crate) use error::CliError;
 #[cfg(unix)]

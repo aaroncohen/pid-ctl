@@ -51,8 +51,11 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
     ui.last_kd = cfg0.kd;
     ui.last_sp = cfg0.setpoint;
 
-    let mut pv_source =
-        build_pv_source(&args.pv_source, args.pv_cmd_timeout, args.pv_stdin_timeout);
+    let mut pv_source = build_pv_source(
+        &args.pv_source,
+        args.pv_cmd_timeout,
+        *args.pv_stdin_timeout.value(),
+    );
     let mut hardware: Option<Box<dyn CvSink>> = args
         .cv_sink
         .as_ref()
@@ -205,8 +208,8 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
 
             let dt = match apply_measured_dt(
                 raw_dt,
-                args.min_dt,
-                args.max_dt,
+                *args.min_dt.value(),
+                *args.max_dt.value(),
                 args.dt_clamp,
                 false, // tune is never quiet (tune and --quiet are mutually exclusive)
                 &mut logger,

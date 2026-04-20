@@ -1,3 +1,4 @@
+use crate::cli::user_set::UserSet;
 use pid_ctl::app::loop_runtime::LoopControls;
 use pid_ctl::app::{SessionConfig, StateStore};
 use pid_ctl_core::PidConfig;
@@ -110,14 +111,14 @@ pub(crate) struct LoopArgs {
     pub(crate) safe_cv: Option<f64>,
     pub(crate) cv_fail_after: u32,
     pub(crate) fail_after: Option<u32>,
-    pub(crate) min_dt: f64,
-    pub(crate) max_dt: f64,
+    pub(crate) min_dt: UserSet<f64>,
+    pub(crate) max_dt: UserSet<f64>,
     pub(crate) dt_clamp: bool,
     pub(crate) log_path: Option<PathBuf>,
     pub(crate) dry_run: bool,
-    pub(crate) pv_stdin_timeout: Duration,
+    pub(crate) pv_stdin_timeout: UserSet<Duration>,
     pub(crate) verify_cv: bool,
-    pub(crate) state_write_interval: Option<Duration>,
+    pub(crate) state_write_interval: UserSet<Option<Duration>>,
     pub(crate) state_fail_after: u32,
     pub(crate) tune: bool,
     pub(crate) tune_history: usize,
@@ -128,10 +129,6 @@ pub(crate) struct LoopArgs {
     pub(crate) units: Option<String>,
     pub(crate) quiet: bool,
     pub(crate) verbose: bool,
-    pub(crate) explicit_max_dt: bool,
-    pub(crate) explicit_min_dt: bool,
-    pub(crate) explicit_pv_stdin_timeout: bool,
-    pub(crate) explicit_state_write_interval: bool,
     #[cfg(unix)]
     pub(crate) socket_path: Option<PathBuf>,
     #[cfg(unix)]
@@ -145,7 +142,7 @@ impl LoopArgs {
             pid: self.pid_config.clone(),
             state_store: self.state_path.clone().map(StateStore::new),
             reset_accumulator: self.reset_accumulator,
-            flush_interval: self.state_write_interval,
+            flush_interval: *self.state_write_interval.value(),
             state_fail_after: self.state_fail_after,
         }
     }
@@ -174,32 +171,26 @@ impl LoopControls for LoopArgs {
     }
 
     fn max_dt(&self) -> f64 {
-        self.max_dt
+        *self.max_dt.value()
     }
 
     fn set_max_dt_unless_explicit(&mut self, v: f64) {
-        if !self.explicit_max_dt {
-            self.max_dt = v;
-        }
+        self.max_dt.set_if_default(v);
     }
 
     fn pv_stdin_timeout(&self) -> Duration {
-        self.pv_stdin_timeout
+        *self.pv_stdin_timeout.value()
     }
 
     fn set_pv_stdin_timeout_unless_explicit(&mut self, d: Duration) {
-        if !self.explicit_pv_stdin_timeout {
-            self.pv_stdin_timeout = d;
-        }
+        self.pv_stdin_timeout.set_if_default(d);
     }
 
     fn state_write_interval(&self) -> Option<Duration> {
-        self.state_write_interval
+        *self.state_write_interval.value()
     }
 
     fn set_state_write_interval_unless_explicit(&mut self, d: Option<Duration>) {
-        if !self.explicit_state_write_interval {
-            self.state_write_interval = d;
-        }
+        self.state_write_interval.set_if_default(d);
     }
 }
