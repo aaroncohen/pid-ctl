@@ -229,8 +229,11 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
 fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
-    let mut pv_source =
-        build_pv_source(&args.pv_source, args.pv_cmd_timeout, args.pv_stdin_timeout);
+    let mut pv_source = build_pv_source(
+        &args.pv_source,
+        args.pv_cmd_timeout,
+        *args.pv_stdin_timeout.value(),
+    );
     let mut cv_sink: Box<dyn CvSink> = if args.dry_run {
         Box::new(DryRunCvSink)
     } else {
@@ -342,8 +345,8 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
 
         let dt = match apply_measured_dt(
             raw_dt,
-            args.min_dt,
-            args.max_dt,
+            *args.min_dt.value(),
+            *args.max_dt.value(),
             args.dt_clamp,
             args.quiet,
             &mut logger,
