@@ -5,6 +5,7 @@
 //! Side effects (hold, resume, interval change) are signalled via [`SocketSideEffect`].
 
 use crate::app::ControllerSession;
+use crate::app::logger::Logger;
 use crate::app::loop_runtime::LoopControls;
 use crate::json_events;
 use crate::socket::{Request, Response};
@@ -24,7 +25,7 @@ pub fn handle_socket_request(
     req: &Request,
     session: &mut ControllerSession,
     controls: &mut dyn LoopControls,
-    log_file: &mut Option<std::fs::File>,
+    logger: &mut Logger,
 ) -> (Response, SocketSideEffect) {
     match req {
         Request::Status => {
@@ -46,12 +47,12 @@ pub fn handle_socket_request(
             )
         }
         Request::Set { param, value } => {
-            handle_socket_set(param, *value, session, controls, log_file)
+            handle_socket_set(param, *value, session, controls, logger)
         }
         Request::Reset => {
             let i_acc_before = session.i_acc();
             session.reset_integral();
-            json_events::emit_integral_reset(log_file, i_acc_before, session.iter(), "socket");
+            json_events::emit_integral_reset(logger, i_acc_before, session.iter(), "socket");
             (
                 Response::Reset {
                     ok: true,
@@ -113,7 +114,7 @@ fn apply_gain_param(
     param: &str,
     value: f64,
     session: &mut ControllerSession,
-    log_file: &mut Option<std::fs::File>,
+    logger: &mut Logger,
 ) -> f64 {
     let idx = match param {
         "kp" => 0usize,
@@ -127,7 +128,7 @@ fn apply_gain_param(
     gains[idx] = value;
     session.set_gains(gains[0], gains[1], gains[2]);
     json_events::emit_gains_changed(
-        log_file,
+        logger,
         session.config().kp,
         session.config().ki,
         session.config().kd,
@@ -143,7 +144,7 @@ fn handle_socket_set(
     value: f64,
     session: &mut ControllerSession,
     controls: &mut dyn LoopControls,
-    log_file: &mut Option<std::fs::File>,
+    logger: &mut Logger,
 ) -> (Response, SocketSideEffect) {
     use crate::app::loop_runtime::apply_runtime_interval;
     use std::time::Duration;
@@ -160,7 +161,7 @@ fn handle_socket_set(
 
     match param {
         "kp" | "ki" | "kd" => {
-            let old = apply_gain_param(param, value, session, log_file);
+            let old = apply_gain_param(param, value, session, logger);
             (
                 Response::Set {
                     ok: true,
@@ -175,7 +176,7 @@ fn handle_socket_set(
             let old = session.config().setpoint;
             session.set_setpoint(value);
             json_events::emit_gains_changed(
-                log_file,
+                logger,
                 session.config().kp,
                 session.config().ki,
                 session.config().kd,

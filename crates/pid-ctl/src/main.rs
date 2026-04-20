@@ -7,9 +7,10 @@ pub(crate) use cli::*;
 use clap::Parser;
 use pid_ctl::adapters::{CvSink, DryRunCvSink, StdoutCvSink};
 use pid_ctl::app::adapters_build::{build_cv_sink, build_pv_source};
+use pid_ctl::app::logger::Logger;
 use pid_ctl::app::loop_runtime::{
     MeasuredDt, apply_measured_dt, emit_state_write_failure, flush_state_at_shutdown,
-    handle_dt_skip_state_write, millis_round_u64, open_log_optional, write_safe_cv,
+    handle_dt_skip_state_write, millis_round_u64, write_safe_cv,
 };
 use pid_ctl::app::{self, ControllerSession, StateSnapshot, StateStore};
 use pid_ctl::json_events;
@@ -109,8 +110,8 @@ fn run(
     }
 }
 
-fn open_log(path: Option<&Path>) -> Result<Option<std::fs::File>, CliError> {
-    open_log_optional(path).map_err(|e| {
+fn open_log(path: Option<&Path>) -> Result<Logger, CliError> {
+    Logger::open(path).map_err(|e| {
         CliError::new(
             1,
             format!("failed to open log file {}: {e}", path.unwrap().display()),
@@ -132,9 +133,9 @@ fn run_once(args: &OnceArgs) -> Result<(), CliError> {
             args.cmd_timeout,
         )
     };
-    let mut log_file = open_log(args.log_path.as_deref())?;
+    let mut logger = open_log(args.log_path.as_deref())?;
 
-    let dt = resolve_once_dt(&session, args, &mut log_file);
+    let dt = resolve_once_dt(&session, args, &mut logger);
 
     let raw_pv = resolve_pv(&args.pv_source, args.pv_cmd_timeout)
         .map_err(|error| CliError::new(1, format!("failed to read PV: {error}")))?;
@@ -142,23 +143,19 @@ fn run_once(args: &OnceArgs) -> Result<(), CliError> {
     match session.process_pv(scaled_pv, dt, sink.as_mut()) {
         Ok(outcome) => {
             if let Some(reason) = outcome.d_term_skipped {
-                json_events::emit_d_term_skipped(&mut log_file, reason, outcome.record.iter);
+                json_events::emit_d_term_skipped(&mut logger, reason, outcome.record.iter);
             }
 
             if matches!(args.output_format, OutputFormat::Json) {
                 print_iteration_json(&outcome.record)?;
             }
 
-            if let Some(file) = log_file.as_mut()
-                && let Ok(json) = serde_json::to_string(&outcome.record)
-            {
-                let _ = writeln!(file, "{json}");
-            }
+            logger.write_iteration_line(&outcome.record);
 
             if let Some(error) = outcome.state_write_failed {
                 if let Some(path) = &args.state_path {
                     json_events::emit_state_write_failed(
-                        &mut log_file,
+                        &mut logger,
                         path.clone(),
                         error.to_string(),
                     );
@@ -172,7 +169,7 @@ fn run_once(args: &OnceArgs) -> Result<(), CliError> {
             Ok(())
         }
         Err(error) => {
-            json_events::emit_cv_write_failed(&mut log_file, error.to_string(), 1);
+            json_events::emit_cv_write_failed(&mut logger, error.to_string(), 1);
             Err(CliError::new(5, error.to_string()))
         }
     }
@@ -184,7 +181,7 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
     let mut sink = StdoutCvSink {
         precision: args.cv_precision,
     };
-    let mut log_file = open_log(args.log_path.as_deref())?;
+    let mut logger = open_log(args.log_path.as_deref())?;
 
     // Monotonic clock for dt: use elapsed time between lines (plan §dt handling).
     // First line uses args.dt (no prior tick to measure from).
@@ -208,20 +205,16 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
             .map_err(|error| CliError::new(1, error.to_string()))?;
 
         if let Some(reason) = outcome.d_term_skipped {
-            json_events::emit_d_term_skipped(&mut log_file, reason, outcome.record.iter);
+            json_events::emit_d_term_skipped(&mut logger, reason, outcome.record.iter);
         }
 
-        if let Some(file) = log_file.as_mut()
-            && let Ok(json) = serde_json::to_string(&outcome.record)
-        {
-            let _ = writeln!(file, "{json}");
-        }
+        logger.write_iteration_line(&outcome.record);
 
         if let Some(error) = outcome.state_write_failed {
             emit_state_write_failure(
                 &session,
                 args.state_path.as_ref(),
-                &mut log_file,
+                &mut logger,
                 &error,
                 false,
             );
@@ -249,7 +242,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         )
     };
 
-    let mut log_file = open_log(args.log_path.as_deref())?;
+    let mut logger = open_log(args.log_path.as_deref())?;
 
     // Bind socket listener when --socket is set.
     #[cfg(unix)]
@@ -262,7 +255,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
                 ),
                 other => CliError::new(1, format!("socket: {other}")),
             })?;
-        json_events::emit_socket_ready(&mut log_file, path.clone());
+        json_events::emit_socket_ready(&mut logger, path.clone());
         Some(listener)
     } else {
         None
@@ -286,7 +279,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         // Check shutdown flag at top of each iteration.
         if shutdown.load(Ordering::Relaxed) {
             write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
-            flush_state_at_shutdown(&mut session, args.state_path.as_ref(), &mut log_file);
+            flush_state_at_shutdown(&mut session, args.state_path.as_ref(), &mut logger);
             break;
         }
 
@@ -302,7 +295,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
                     args,
                     &mut hold,
                     &shutdown,
-                    &mut log_file,
+                    &mut logger,
                 );
             } else {
                 std::thread::sleep(next_deadline - now);
@@ -314,7 +307,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         // Check shutdown again after sleeping (signal may have arrived during sleep).
         if shutdown.load(Ordering::Relaxed) {
             write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
-            flush_state_at_shutdown(&mut session, args.state_path.as_ref(), &mut log_file);
+            flush_state_at_shutdown(&mut session, args.state_path.as_ref(), &mut logger);
             break;
         }
 
@@ -343,7 +336,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
             }
             let interval_ms = millis_round_u64(interval_secs * 1000.0);
             let actual_ms = millis_round_u64(raw_dt * 1000.0);
-            json_events::emit_interval_slip(&mut log_file, interval_ms, actual_ms);
+            json_events::emit_interval_slip(&mut logger, interval_ms, actual_ms);
         }
 
         let dt = match apply_measured_dt(
@@ -352,14 +345,14 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
             args.max_dt,
             args.dt_clamp,
             args.quiet,
-            &mut log_file,
+            &mut logger,
         ) {
             MeasuredDt::Skip => {
                 handle_dt_skip_state_write(
                     session.on_dt_skipped(),
                     &session,
                     args.state_path.as_ref(),
-                    &mut log_file,
+                    &mut logger,
                     args.quiet,
                 );
                 continue;
@@ -376,12 +369,12 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
             Err(error) => {
                 pv_fail_count += 1;
                 eprintln!("PV read failed: {error}");
-                json_events::emit_pv_read_failure(&mut log_file, error.to_string(), args.safe_cv);
+                json_events::emit_pv_read_failure(&mut logger, error.to_string(), args.safe_cv);
                 write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
                 if let Some(limit) = args.fail_after
                     && pv_fail_count >= limit
                 {
-                    json_events::emit_pv_fail_after_reached(&mut log_file, pv_fail_count, limit);
+                    json_events::emit_pv_fail_after_reached(&mut logger, pv_fail_count, limit);
                     return Err(CliError::new(
                         2,
                         format!("exiting after {pv_fail_count} consecutive PV read failures"),
@@ -397,7 +390,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
             dt,
             &mut session,
             cv_sink.as_mut(),
-            &mut log_file,
+            &mut logger,
             &mut cv_fail_count,
         )?;
     }
@@ -414,7 +407,7 @@ fn run_loop_tick(
     dt: f64,
     session: &mut ControllerSession,
     cv_sink: &mut dyn CvSink,
-    log_file: &mut Option<std::fs::File>,
+    logger: &mut Logger,
     cv_fail_count: &mut u32,
 ) -> Result<(), CliError> {
     let scaled_pv = raw_pv * args.scale;
@@ -424,7 +417,7 @@ fn run_loop_tick(
             *cv_fail_count = 0;
 
             if let Some(reason) = outcome.d_term_skipped {
-                json_events::emit_d_term_skipped(log_file, reason, outcome.record.iter);
+                json_events::emit_d_term_skipped(logger, reason, outcome.record.iter);
             }
 
             if matches!(args.output_format, OutputFormat::Json)
@@ -433,11 +426,7 @@ fn run_loop_tick(
                 eprintln!("output write failed: {error}");
             }
 
-            if let Some(file) = log_file
-                && let Ok(json) = serde_json::to_string(&outcome.record)
-            {
-                let _ = writeln!(file, "{json}");
-            }
+            logger.write_iteration_line(&outcome.record);
 
             if args.verbose {
                 let r = &outcome.record;
@@ -451,7 +440,7 @@ fn run_loop_tick(
                 emit_state_write_failure(
                     session,
                     args.state_path.as_ref(),
-                    log_file,
+                    logger,
                     &error,
                     args.quiet,
                 );
@@ -461,7 +450,7 @@ fn run_loop_tick(
             *cv_fail_count += 1;
             let limit = args.cv_fail_after;
             eprintln!("CV write failed ({cv_fail_count}/{limit}): {error}");
-            json_events::emit_cv_write_failed(log_file, error.to_string(), *cv_fail_count);
+            json_events::emit_cv_write_failed(logger, error.to_string(), *cv_fail_count);
             if *cv_fail_count >= limit {
                 write_safe_cv(args.safe_cv, cv_sink, session);
                 return Err(CliError::new(
@@ -475,11 +464,7 @@ fn run_loop_tick(
     Ok(())
 }
 
-fn resolve_once_dt(
-    session: &ControllerSession,
-    args: &OnceArgs,
-    log: &mut Option<std::fs::File>,
-) -> f64 {
+fn resolve_once_dt(session: &ControllerSession, args: &OnceArgs, logger: &mut Logger) -> f64 {
     if args.dt_explicit {
         return args.dt;
     }
@@ -489,27 +474,22 @@ fn resolve_once_dt(
     session
         .wall_clock_dt_since_state_update()
         .map_or(args.dt, |raw| {
-            clamp_once_wall_clock_dt(raw, args.min_dt, args.max_dt, log)
+            clamp_once_wall_clock_dt(raw, args.min_dt, args.max_dt, logger)
         })
 }
 
-fn clamp_once_wall_clock_dt(
-    raw: f64,
-    min_dt: f64,
-    max_dt: f64,
-    log: &mut Option<std::fs::File>,
-) -> f64 {
+fn clamp_once_wall_clock_dt(raw: f64, min_dt: f64, max_dt: f64, logger: &mut Logger) -> f64 {
     let raw = raw.max(0.0);
     if raw < min_dt {
         eprintln!("once: wall-clock dt {raw:.6}s below --min-dt {min_dt:.6}s — clamping to min_dt");
-        json_events::emit_dt_clamped(log, raw, min_dt);
+        json_events::emit_dt_clamped(logger, raw, min_dt);
         return min_dt;
     }
     if raw > max_dt {
         eprintln!(
             "once: wall-clock dt {raw:.6}s exceeds --max-dt {max_dt:.6}s — clamping to max_dt"
         );
-        json_events::emit_dt_clamped(log, raw, max_dt);
+        json_events::emit_dt_clamped(logger, raw, max_dt);
         return max_dt;
     }
     raw
@@ -524,7 +504,7 @@ fn sleep_with_socket(
     args: &mut LoopArgs,
     hold: &mut bool,
     shutdown: &AtomicBool,
-    log_file: &mut Option<std::fs::File>,
+    logger: &mut Logger,
 ) {
     loop {
         let now = Instant::now();
@@ -536,7 +516,7 @@ fn sleep_with_socket(
 
         for _ in 0..10 {
             match listener.try_service_one(|req| {
-                let (resp, effect) = handle_socket_request(&req, session, args, log_file);
+                let (resp, effect) = handle_socket_request(&req, session, args, logger);
                 match effect {
                     SocketSideEffect::Hold => *hold = true,
                     SocketSideEffect::Resume => *hold = false,

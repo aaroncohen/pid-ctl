@@ -1,45 +1,15 @@
 //! Structured NDJSON event lines (stderr + optional `--log` file).
 //!
-//! [`suppress_structured_json_stderr`] disables stderr for `emit_*` only (not other `eprintln!`),
-//! so `loop --tune` can use an alternate-screen TUI on stdout without JSON lines corrupting the
-//! display — events still append to `--log` when set.
+//! All `emit_*` functions take `&mut Logger`; stderr suppression is controlled
+//! by [`Logger::suppressed`] rather than a process-global flag.
 
+use crate::app::logger::Logger;
 use crate::app::{STATE_SCHEMA_VERSION, now_iso8601};
 use serde::Serialize;
-use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-static SUPPRESS_STRUCTURED_JSON_STDERR: AtomicBool = AtomicBool::new(false);
-
-fn emit_line(log: &mut Option<std::fs::File>, record: &impl Serialize) {
-    let Ok(json) = serde_json::to_string(record) else {
-        return;
-    };
-    if !SUPPRESS_STRUCTURED_JSON_STDERR.load(Ordering::Relaxed) {
-        eprintln!("{json}");
-    }
-    if let Some(f) = log {
-        let _ = writeln!(f, "{json}");
-    }
-}
-
-/// While held, structured NDJSON events are written to `--log` only, not stderr.
-///
-/// Used by `loop --tune` so `emit_*` lines do not interleave with the ratatui display (stderr is not
-/// in the alternate screen buffer).
-#[must_use]
-pub fn suppress_structured_json_stderr() -> StructuredJsonStderrGuard {
-    SUPPRESS_STRUCTURED_JSON_STDERR.store(true, Ordering::Relaxed);
-    StructuredJsonStderrGuard
-}
-
-pub struct StructuredJsonStderrGuard;
-
-impl Drop for StructuredJsonStderrGuard {
-    fn drop(&mut self) {
-        SUPPRESS_STRUCTURED_JSON_STDERR.store(false, Ordering::Relaxed);
-    }
+fn emit_line(logger: &mut Logger, record: &impl Serialize) {
+    logger.write_event(record);
 }
 
 /// Generates a serialisable event struct with the common envelope fields
@@ -77,8 +47,8 @@ macro_rules! event_struct {
             }
         }
 
-        pub fn $emit(log: &mut Option<std::fs::File>) {
-            emit_line(log, &$name::new());
+        pub fn $emit(logger: &mut Logger) {
+            emit_line(logger, &$name::new());
         }
     };
 
@@ -106,8 +76,8 @@ macro_rules! event_struct {
             }
         }
 
-        pub fn $emit(log: &mut Option<std::fs::File>, $( $field: $ty ),+) {
-            emit_line(log, &$name::new($( $field ),+));
+        pub fn $emit(logger: &mut Logger, $( $field: $ty ),+) {
+            emit_line(logger, &$name::new($( $field ),+));
         }
     };
 }
@@ -204,12 +174,8 @@ impl PvReadFailureEvent {
     }
 }
 
-pub fn emit_pv_read_failure(
-    log: &mut Option<std::fs::File>,
-    error: impl Into<String>,
-    safe_cv: Option<f64>,
-) {
-    emit_line(log, &PvReadFailureEvent::new(error, safe_cv));
+pub fn emit_pv_read_failure(logger: &mut Logger, error: impl Into<String>, safe_cv: Option<f64>) {
+    emit_line(logger, &PvReadFailureEvent::new(error, safe_cv));
 }
 
 /// D-term skipped event — payload uses `&'static str` reason derived from enum variant.
@@ -245,12 +211,8 @@ pub const fn reason_str(reason: pid_ctl_core::DTermSkipReason) -> &'static str {
     }
 }
 
-pub fn emit_d_term_skipped(
-    log: &mut Option<std::fs::File>,
-    reason: pid_ctl_core::DTermSkipReason,
-    iter: u64,
-) {
-    emit_line(log, &DTermSkippedEvent::new(reason_str(reason), iter));
+pub fn emit_d_term_skipped(logger: &mut Logger, reason: pid_ctl_core::DTermSkipReason, iter: u64) {
+    emit_line(logger, &DTermSkippedEvent::new(reason_str(reason), iter));
 }
 
 #[cfg(test)]
@@ -259,11 +221,10 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom};
 
     #[test]
-    fn suppress_guard_still_appends_to_log() {
-        let mut log = Some(tempfile::tempfile().unwrap());
-        let _guard = suppress_structured_json_stderr();
-        emit_gains_changed(&mut log, 1.0, 0.0, 0.0, 1.0, 1, "tui");
-        let mut f = log.unwrap();
+    fn suppressed_logger_still_appends_to_log() {
+        let mut logger = Logger::from_file(tempfile::tempfile().unwrap()).suppressed();
+        emit_gains_changed(&mut logger, 1.0, 0.0, 0.0, 1.0, 1, "tui");
+        let mut f = logger.into_file().unwrap();
         let mut s = String::new();
         f.seek(SeekFrom::Start(0)).unwrap();
         f.read_to_string(&mut s).unwrap();
@@ -272,9 +233,9 @@ mod tests {
 
     #[test]
     fn socket_ready_event_fields() {
-        let mut log = Some(tempfile::tempfile().unwrap());
-        emit_socket_ready(&mut log, std::path::PathBuf::from("/tmp/ctl.sock"));
-        let mut f = log.unwrap();
+        let mut logger = Logger::from_file(tempfile::tempfile().unwrap());
+        emit_socket_ready(&mut logger, std::path::PathBuf::from("/tmp/ctl.sock"));
+        let mut f = logger.into_file().unwrap();
         let mut s = String::new();
         f.seek(SeekFrom::Start(0)).unwrap();
         f.read_to_string(&mut s).unwrap();
@@ -285,9 +246,9 @@ mod tests {
 
     #[test]
     fn integral_reset_event_fields() {
-        let mut log = Some(tempfile::tempfile().unwrap());
-        emit_integral_reset(&mut log, 42.5, 7, "socket");
-        let mut f = log.unwrap();
+        let mut logger = Logger::from_file(tempfile::tempfile().unwrap());
+        emit_integral_reset(&mut logger, 42.5, 7, "socket");
+        let mut f = logger.into_file().unwrap();
         let mut s = String::new();
         f.seek(SeekFrom::Start(0)).unwrap();
         f.read_to_string(&mut s).unwrap();
@@ -305,9 +266,9 @@ mod tests {
 
     #[test]
     fn macro_generated_events_have_correct_envelope() {
-        let mut log = Some(tempfile::tempfile().unwrap());
-        emit_dt_skipped(&mut log, 0.6, 0.1, 0.5);
-        let mut f = log.unwrap();
+        let mut logger = Logger::from_file(tempfile::tempfile().unwrap());
+        emit_dt_skipped(&mut logger, 0.6, 0.1, 0.5);
+        let mut f = logger.into_file().unwrap();
         let mut s = String::new();
         f.seek(SeekFrom::Start(0)).unwrap();
         f.read_to_string(&mut s).unwrap();
@@ -322,9 +283,9 @@ mod tests {
 
     #[test]
     fn pv_read_failure_safe_cv_skipped_when_none() {
-        let mut log = Some(tempfile::tempfile().unwrap());
-        emit_pv_read_failure(&mut log, "timeout", None);
-        let mut f = log.unwrap();
+        let mut logger = Logger::from_file(tempfile::tempfile().unwrap());
+        emit_pv_read_failure(&mut logger, "timeout", None);
+        let mut f = logger.into_file().unwrap();
         let mut s = String::new();
         f.seek(SeekFrom::Start(0)).unwrap();
         f.read_to_string(&mut s).unwrap();
