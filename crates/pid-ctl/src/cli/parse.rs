@@ -171,29 +171,29 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
     let tune = false;
 
     #[cfg(feature = "tui")]
-    let tune_history = raw.tune_history;
+    let tune_history: usize = raw.tune_history.unwrap_or(60).max(1);
     #[cfg(not(feature = "tui"))]
-    let tune_history: Option<usize> = None;
+    let tune_history: usize = 60;
 
     #[cfg(feature = "tui")]
-    let tune_step_kp = raw.tune_step_kp;
+    let tune_step_kp: f64 = raw.tune_step_kp.unwrap_or(0.1);
     #[cfg(not(feature = "tui"))]
-    let tune_step_kp: Option<f64> = None;
+    let tune_step_kp: f64 = 0.1;
 
     #[cfg(feature = "tui")]
-    let tune_step_ki = raw.tune_step_ki;
+    let tune_step_ki: f64 = raw.tune_step_ki.unwrap_or(0.01);
     #[cfg(not(feature = "tui"))]
-    let tune_step_ki: Option<f64> = None;
+    let tune_step_ki: f64 = 0.01;
 
     #[cfg(feature = "tui")]
-    let tune_step_kd = raw.tune_step_kd;
+    let tune_step_kd: f64 = raw.tune_step_kd.unwrap_or(0.05);
     #[cfg(not(feature = "tui"))]
-    let tune_step_kd: Option<f64> = None;
+    let tune_step_kd: f64 = 0.05;
 
     #[cfg(feature = "tui")]
-    let tune_step_sp = raw.tune_step_sp;
+    let tune_step_sp: f64 = raw.tune_step_sp.unwrap_or(0.1);
     #[cfg(not(feature = "tui"))]
-    let tune_step_sp: Option<f64> = None;
+    let tune_step_sp: f64 = 0.1;
 
     let output_format: OutputFormat = raw.common.format.clone().into();
 
@@ -329,11 +329,11 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
         state_write_interval,
         state_fail_after: raw.common.state_fail_after.unwrap_or(10),
         tune,
-        tune_history: tune_history.unwrap_or(60).max(1),
-        tune_step_kp: tune_step_kp.unwrap_or(0.1),
-        tune_step_ki: tune_step_ki.unwrap_or(0.01),
-        tune_step_kd: tune_step_kd.unwrap_or(0.05),
-        tune_step_sp: tune_step_sp.unwrap_or(0.1),
+        tune_history,
+        tune_step_kp,
+        tune_step_ki,
+        tune_step_kd,
+        tune_step_sp,
         units: raw.common.units.clone(),
         quiet: raw.common.quiet,
         verbose: raw.common.verbose,
