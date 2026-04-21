@@ -1,4 +1,22 @@
 //! Interactive `loop --tune` dashboard (`pid-ctl_plan.md` § `--tune`).
+//!
+//! # Why `tune` lives in the binary crate
+//!
+//! Phase 6 of the refactor plan evaluated moving this module into `pid_ctl` (the library).
+//! The recommendation — keep it here — stands for three reasons that remain true after
+//! phases 0–5:
+//!
+//! 1. **Terminal ownership**: the event loop drives raw-mode stdout via ratatui/crossterm,
+//!    which is a binary-level concern, not a library API.
+//! 2. **Binary error type**: every fallible path returns [`crate::CliError`], which is
+//!    intentionally `pub(crate)` inside the binary; the library uses typed errors that
+//!    `main.rs` converts at the boundary.
+//! 3. **Dependency hygiene**: pulling `ratatui`/`crossterm` into the library would force
+//!    the `tui` feature onto every downstream consumer of `pid_ctl`.
+//!
+//! If a future need arises (e.g. an embedder wants headless tick-loop access), the pure
+//! data types (`TuneUiState`, history, model) can be extracted to the library at that
+//! point without invalidating this decision for the TUI-specific logic.
 
 mod model;
 
