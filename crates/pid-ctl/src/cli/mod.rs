@@ -1,10 +1,12 @@
 mod error;
+mod output;
 mod parse;
 mod raw;
 mod types;
 pub(crate) mod user_set;
 
 pub(crate) use error::CliError;
+pub(crate) use output::print_iteration_json;
 #[cfg(unix)]
 pub(crate) use parse::{get_socket_path, parse_set_args};
 pub(crate) use parse::{
