@@ -108,19 +108,29 @@ pub fn handle_socket_request(
     }
 }
 
-/// Apply a single gain parameter (kp/ki/kd) to the session and emit the change event.
+/// The three gain parameters that `apply_gain_param` can update.
+///
+/// Using a dedicated enum rather than `&str` makes `apply_gain_param`'s match
+/// exhaustive, eliminating the need for an `unreachable!()` arm on `_`.
+#[derive(Clone, Copy)]
+enum GainParam {
+    Kp,
+    Ki,
+    Kd,
+}
+
+/// Apply a single gain parameter to the session and emit the change event.
 /// Returns the old value. Gains are ordered [kp, ki, kd] throughout.
 fn apply_gain_param(
-    param: &str,
+    param: GainParam,
     value: f64,
     session: &mut ControllerSession,
     logger: &mut Logger,
 ) -> f64 {
     let idx = match param {
-        "kp" => 0usize,
-        "ki" => 1,
-        "kd" => 2,
-        _ => unreachable!("apply_gain_param called with non-gain param: {param}"),
+        GainParam::Kp => 0usize,
+        GainParam::Ki => 1,
+        GainParam::Kd => 2,
     };
     let cfg = session.config();
     let mut gains = [cfg.kp, cfg.ki, cfg.kd];
@@ -161,7 +171,12 @@ fn handle_socket_set(
 
     match param {
         "kp" | "ki" | "kd" => {
-            let old = apply_gain_param(param, value, session, logger);
+            let gain = match param {
+                "kp" => GainParam::Kp,
+                "ki" => GainParam::Ki,
+                _ => GainParam::Kd,
+            };
+            let old = apply_gain_param(gain, value, session, logger);
             (
                 Response::Set {
                     ok: true,
