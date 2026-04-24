@@ -59,7 +59,7 @@ use std::time::{Duration, Instant};
 // The event loop integrates input, PID ticking, socket servicing, and throttled redraws in one
 // place — splitting it further would require passing state through many helper boundaries.
 #[allow(clippy::too_many_lines)]
-pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
+pub(crate) fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|e| CliError::config(e.to_string()))?;
     let cfg0 = session.config().clone();

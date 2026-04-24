@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn sim_error_implements_std_error() {
         use std::error::Error;
-        let e = crate::SimError::Validation(String::from("test"));
+        let e = SimError::Validation(String::from("test"));
         assert!(e.source().is_none());
         assert_eq!(e.to_string(), "test");
     }

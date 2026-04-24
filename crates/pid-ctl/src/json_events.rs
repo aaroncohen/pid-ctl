@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn socket_ready_event_fields() {
         let mut logger = Logger::from_file(tempfile::tempfile().unwrap());
-        emit_socket_ready(&mut logger, std::path::PathBuf::from("/tmp/ctl.sock"));
+        emit_socket_ready(&mut logger, PathBuf::from("/tmp/ctl.sock"));
         let mut f = logger.into_file().unwrap();
         let mut s = String::new();
         f.seek(SeekFrom::Start(0)).unwrap();

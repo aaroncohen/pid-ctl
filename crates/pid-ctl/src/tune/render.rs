@@ -436,7 +436,7 @@ pub(in crate::tune) fn render_frame(
                     ctx.print(
                         x_max,
                         *y,
-                        ratatui::text::Span::styled(*sym, Style::default().fg(Color::DarkGray)),
+                        Span::styled(*sym, Style::default().fg(Color::DarkGray)),
                     );
                 }
             }),
