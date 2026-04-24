@@ -41,8 +41,8 @@ use pid_ctl::adapters::{CvSink, DryRunCvSink};
 use pid_ctl::app::adapters_build::{build_cv_sink, build_pv_source};
 use pid_ctl::app::logger::Logger;
 use pid_ctl::app::loop_runtime::{
-    MeasuredDt, apply_measured_dt, emit_state_write_failure, handle_dt_skip_state_write,
-    write_safe_cv,
+    LoopControls, MeasuredDt, apply_measured_dt, emit_state_write_failure,
+    handle_dt_skip_state_write, write_safe_cv,
 };
 use pid_ctl::app::ticker::{self, TickContext, TickObserver, TickStepResult};
 use pid_ctl::app::{ControllerSession, TickError, TickOutcome};
@@ -72,7 +72,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
     let mut pv_source = build_pv_source(
         &args.pv_source,
         args.pv_cmd_timeout,
-        *args.pv_stdin_timeout.value(),
+        args.runtime.pv_stdin_timeout(),
     );
     let mut hardware: Option<Box<dyn CvSink>> = args
         .cv_sink
@@ -115,8 +115,8 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
     let mut terminal =
         Terminal::new(backend).map_err(|e| CliError::new(1, format!("terminal: {e}")))?;
 
-    let mut next_deadline = Instant::now() + args.interval;
-    let mut last_interval = args.interval;
+    let mut next_deadline = Instant::now() + args.runtime.interval;
+    let mut last_interval = args.runtime.interval;
     let mut last_tick = Instant::now();
     let mut last_idle_draw = Instant::now()
         .checked_sub(TUNE_IDLE_DRAW_MIN)
@@ -180,8 +180,12 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                 use pid_ctl::app::socket_dispatch::{SocketSideEffect, handle_socket_request};
                 for _ in 0..10 {
                     match listener.try_service_one(|req| {
-                        let (resp, effect) =
-                            handle_socket_request(&req, &mut session, &mut args, &mut logger);
+                        let (resp, effect) = handle_socket_request(
+                            &req,
+                            &mut session,
+                            &mut args.runtime,
+                            &mut logger,
+                        );
                         match effect {
                             SocketSideEffect::Hold => ui.hold = true,
                             SocketSideEffect::Resume => ui.hold = false,
@@ -195,13 +199,13 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
                 }
             }
 
-            if args.interval != last_interval {
-                last_interval = args.interval;
-                next_deadline = Instant::now() + args.interval;
+            if args.runtime.interval != last_interval {
+                last_interval = args.runtime.interval;
+                next_deadline = Instant::now() + args.runtime.interval;
             }
 
             let now = Instant::now();
-            let interval_secs = args.interval.as_secs_f64();
+            let interval_secs = args.runtime.interval.as_secs_f64();
             if now < next_deadline {
                 let until = next_deadline.saturating_duration_since(now);
                 let should_idle_draw = had_terminal_event
@@ -215,7 +219,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
             }
 
             let tick_deadline = next_deadline;
-            next_deadline = next_deadline_after_tick(tick_deadline, args.interval, now);
+            next_deadline = next_deadline_after_tick(tick_deadline, args.runtime.interval, now);
             let raw_dt = now.duration_since(last_tick).as_secs_f64();
             last_tick = now;
 
@@ -227,7 +231,7 @@ pub fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliError> {
             let dt = match apply_measured_dt(
                 raw_dt,
                 *args.min_dt.value(),
-                *args.max_dt.value(),
+                args.runtime.max_dt(),
                 args.dt_clamp,
                 false, // tune is never quiet (tune and --quiet are mutually exclusive)
                 &mut logger,

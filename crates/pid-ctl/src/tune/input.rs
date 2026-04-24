@@ -277,7 +277,11 @@ pub(in crate::tune) fn run_command_line(
                 .next()
                 .ok_or_else(|| CliError::config("interval requires a duration"))?;
             let new_interval = crate::parse_duration_flag("--interval", dur_s)?;
-            pid_ctl::app::loop_runtime::apply_runtime_interval(session, args, new_interval);
+            pid_ctl::app::loop_runtime::apply_runtime_interval(
+                session,
+                &mut args.runtime,
+                new_interval,
+            );
             Ok(())
         }
         "reset" => {

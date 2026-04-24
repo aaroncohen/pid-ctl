@@ -18,4 +18,6 @@ pub(crate) use parse::{
 pub(crate) use raw::{Cli, SubCommand};
 #[cfg(unix)]
 pub(crate) use raw::{SetRawArgs, SocketOnlyArgs};
-pub(crate) use types::{LoopArgs, OnceArgs, OutputFormat, PipeArgs, StatusFlags};
+pub(crate) use types::{
+    LoopArgs, LoopRuntimeConfig, OnceArgs, OutputFormat, PipeArgs, StatusFlags,
+};

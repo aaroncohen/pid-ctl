@@ -9,7 +9,7 @@ use pid_ctl::adapters::{CvSink, DryRunCvSink, StdoutCvSink};
 use pid_ctl::app::adapters_build::{build_cv_sink, build_pv_source};
 use pid_ctl::app::logger::Logger;
 use pid_ctl::app::loop_runtime::{
-    MeasuredDt, apply_measured_dt, emit_state_write_failure, flush_state_at_shutdown,
+    LoopControls, MeasuredDt, apply_measured_dt, emit_state_write_failure, flush_state_at_shutdown,
     handle_dt_skip_state_write, millis_round_u64, write_safe_cv,
 };
 use pid_ctl::app::ticker::{self, TickContext, TickObserver, TickStepResult};
@@ -232,7 +232,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
     let mut pv_source = build_pv_source(
         &args.pv_source,
         args.pv_cmd_timeout,
-        *args.pv_stdin_timeout.value(),
+        args.runtime.pv_stdin_timeout(),
     );
     let mut cv_sink: Box<dyn CvSink> = if args.dry_run {
         Box::new(DryRunCvSink)
@@ -273,7 +273,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
     })
     .expect("signal handler");
 
-    let mut next_deadline = Instant::now() + args.interval;
+    let mut next_deadline = Instant::now() + args.runtime.interval;
     let mut last_tick = Instant::now();
     let mut cv_fail_count: u32 = 0;
     let mut pv_fail_count: u32 = 0;
@@ -296,7 +296,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
                     next_deadline,
                     listener,
                     &mut session,
-                    args,
+                    &mut args.runtime,
                     &mut hold,
                     &shutdown,
                     &mut logger,
@@ -317,7 +317,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
 
         let now = Instant::now();
         let tick_deadline = next_deadline;
-        next_deadline = next_deadline_after_tick(tick_deadline, args.interval, now);
+        next_deadline = next_deadline_after_tick(tick_deadline, args.runtime.interval, now);
 
         // Hold mode: skip PID computation, keep servicing socket.
         if hold {
@@ -329,7 +329,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         last_tick = now;
 
         // Interval slip (plan: Reliability §10 — tick longer than configured `--interval`).
-        let interval_secs = args.interval.as_secs_f64();
+        let interval_secs = args.runtime.interval.as_secs_f64();
         if raw_dt > interval_secs {
             if !args.quiet {
                 eprintln!(
@@ -346,7 +346,7 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         let dt = match apply_measured_dt(
             raw_dt,
             *args.min_dt.value(),
-            *args.max_dt.value(),
+            args.runtime.max_dt(),
             args.dt_clamp,
             args.quiet,
             &mut logger,
@@ -481,7 +481,7 @@ fn sleep_with_socket(
     until: Instant,
     listener: &pid_ctl::socket::SocketListener,
     session: &mut ControllerSession,
-    args: &mut LoopArgs,
+    runtime: &mut LoopRuntimeConfig,
     hold: &mut bool,
     shutdown: &AtomicBool,
     logger: &mut Logger,
@@ -496,7 +496,7 @@ fn sleep_with_socket(
 
         for _ in 0..10 {
             match listener.try_service_one(|req| {
-                let (resp, effect) = handle_socket_request(&req, session, args, logger);
+                let (resp, effect) = handle_socket_request(&req, session, runtime, logger);
                 match effect {
                     SocketSideEffect::Hold => *hold = true,
                     SocketSideEffect::Resume => *hold = false,

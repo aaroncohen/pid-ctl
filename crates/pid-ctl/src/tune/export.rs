@@ -45,7 +45,14 @@ pub(in crate::tune) fn is_export_tunable_flag(s: &str) -> bool {
 
 pub(in crate::tune) fn build_export_line(full_argv: &[String], args: &LoopArgs) -> String {
     let c = &args.pid_config;
-    build_export_line_values(full_argv, c.setpoint, c.kp, c.ki, c.kd, args.interval)
+    build_export_line_values(
+        full_argv,
+        c.setpoint,
+        c.kp,
+        c.ki,
+        c.kd,
+        args.runtime.interval,
+    )
 }
 
 pub(in crate::tune) fn build_export_line_values(

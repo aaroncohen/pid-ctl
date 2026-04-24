@@ -498,7 +498,12 @@ pub(in crate::tune) fn render_frame(
     if ui.command_mode {
         use ratatui::style::Modifier;
         use ratatui::widgets::Clear;
-        let hint = command_mode_hint(&ui.command_buf, cfg, args.interval, args.units.as_deref());
+        let hint = command_mode_hint(
+            &ui.command_buf,
+            cfg,
+            args.runtime.interval,
+            args.units.as_deref(),
+        );
         let area = centered_rect(88, 18, f.area());
         let block = Block::default()
             .borders(Borders::ALL)

@@ -13,17 +13,24 @@ pub enum MeasuredDt {
     Use(f64),
 }
 
-/// Trait over the mutable loop-configuration state that socket commands and the interval command
-/// need to inspect and update without depending on the concrete [`super::super::cli::types::LoopArgs`] type.
+/// Trait over the mutable runtime loop configuration.
+///
+/// Used by socket dispatch and the interval command to inspect and update loop parameters
+/// without depending on the concrete `LoopRuntimeConfig` type. The `maybe_set_*` methods
+/// update a field only when the user did not supply an explicit CLI value; if the user
+/// provided an explicit value it is never overridden at runtime.
 pub trait LoopControls {
     fn interval(&self) -> Duration;
     fn set_interval(&mut self, d: Duration);
     fn max_dt(&self) -> f64;
-    fn set_max_dt_unless_explicit(&mut self, v: f64);
+    /// Sets `max_dt` only when the user did not explicitly provide `--max-dt` on the CLI.
+    fn maybe_set_max_dt(&mut self, v: f64);
     fn pv_stdin_timeout(&self) -> Duration;
-    fn set_pv_stdin_timeout_unless_explicit(&mut self, d: Duration);
+    /// Sets `pv_stdin_timeout` only when the user did not explicitly provide `--pv-stdin-timeout`.
+    fn maybe_set_pv_stdin_timeout(&mut self, d: Duration);
     fn state_write_interval(&self) -> Option<Duration>;
-    fn set_state_write_interval_unless_explicit(&mut self, d: Option<Duration>);
+    /// Sets `state_write_interval` only when the user did not explicitly provide `--state-write-interval`.
+    fn maybe_set_state_write_interval(&mut self, d: Option<Duration>);
 }
 
 /// Applies a new loop interval at runtime, updating derived defaults (`max_dt`,
@@ -35,10 +42,10 @@ pub fn apply_runtime_interval(
 ) {
     controls.set_interval(new_interval);
     let s = new_interval.as_secs_f64();
-    controls.set_max_dt_unless_explicit((s * 3.0_f64).clamp(0.01, 60.0));
-    controls.set_pv_stdin_timeout_unless_explicit(new_interval);
+    controls.maybe_set_max_dt((s * 3.0_f64).clamp(0.01, 60.0));
+    controls.maybe_set_pv_stdin_timeout(new_interval);
     let min_flush = Duration::from_millis(100);
-    controls.set_state_write_interval_unless_explicit(Some(new_interval.max(min_flush)));
+    controls.maybe_set_state_write_interval(Some(new_interval.max(min_flush)));
     session.set_flush_interval(controls.state_write_interval());
 }
 
