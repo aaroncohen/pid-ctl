@@ -1,7 +1,7 @@
 use super::raw::{LoopRawArgs, OnceRawArgs, PipeRawArgs, StatusRawArgs};
 use super::types::{
-    CvSinkConfig, LoopArgs, OnceArgs, OutputFormat, PidFlags, PipeArgs, PvSourceConfig, SetArgs,
-    StatusFlags,
+    CvSinkConfig, LoopArgs, LoopRuntimeConfig, OnceArgs, OutputFormat, PidFlags, PipeArgs,
+    PvSourceConfig, SetArgs, StatusFlags,
 };
 use super::user_set::UserSet;
 use crate::CliError;
@@ -297,8 +297,18 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
     #[cfg(unix)]
     let socket_mode = raw.socket_mode.unwrap_or(0o600);
 
+    let max_dt = raw
+        .common
+        .max_dt
+        .map_or_else(|| UserSet::Default(max_dt_default), UserSet::Explicit);
+
     Ok(LoopArgs {
-        interval,
+        runtime: LoopRuntimeConfig {
+            interval,
+            max_dt,
+            pv_stdin_timeout,
+            state_write_interval,
+        },
         pv_source,
         cv_sink,
         pid_config,
@@ -317,16 +327,10 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
             .common
             .min_dt
             .map_or_else(|| UserSet::Default(0.01), UserSet::Explicit),
-        max_dt: raw
-            .common
-            .max_dt
-            .map_or_else(|| UserSet::Default(max_dt_default), UserSet::Explicit),
         dt_clamp: raw.common.dt_clamp,
         log_path: raw.common.log.clone(),
         dry_run: raw.dry_run,
-        pv_stdin_timeout,
         verify_cv: raw.cv.verify_cv,
-        state_write_interval,
         state_fail_after: raw.common.state_fail_after.unwrap_or(10),
         tune,
         tune_history,

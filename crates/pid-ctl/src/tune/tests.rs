@@ -484,7 +484,12 @@ fn test_pid_config() -> pid_ctl_core::PidConfig {
 
 fn test_loop_args(config: pid_ctl_core::PidConfig) -> super::LoopArgs {
     super::LoopArgs {
-        interval: Duration::from_secs(1),
+        runtime: crate::LoopRuntimeConfig {
+            interval: Duration::from_secs(1),
+            max_dt: crate::cli::user_set::UserSet::Default(2.0),
+            pv_stdin_timeout: crate::cli::user_set::UserSet::Default(Duration::from_secs(5)),
+            state_write_interval: crate::cli::user_set::UserSet::Default(None),
+        },
         pv_source: pid_ctl::app::adapters_build::PvSourceConfig::Literal(0.0),
         cv_sink: None,
         pid_config: config,
@@ -500,13 +505,10 @@ fn test_loop_args(config: pid_ctl_core::PidConfig) -> super::LoopArgs {
         cv_fail_after: 3,
         fail_after: None,
         min_dt: crate::cli::user_set::UserSet::Default(0.5),
-        max_dt: crate::cli::user_set::UserSet::Default(2.0),
         dt_clamp: false,
         log_path: None,
         dry_run: true,
-        pv_stdin_timeout: crate::cli::user_set::UserSet::Default(Duration::from_secs(5)),
         verify_cv: false,
-        state_write_interval: crate::cli::user_set::UserSet::Default(None),
         state_fail_after: 3,
         tune: true,
         tune_history: 60,

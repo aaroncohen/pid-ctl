@@ -93,10 +93,57 @@ impl PipeArgs {
     }
 }
 
+/// The four loop parameters that socket commands may update at runtime.
+///
+/// Separated from [`LoopArgs`] so that the mutable runtime surface is explicit: only fields
+/// in this struct can change after the loop starts. `maybe_set_*` methods honour user-explicit
+/// CLI values — they are no-ops when the user already provided a flag.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LoopRuntimeConfig {
+    pub(crate) interval: Duration,
+    pub(crate) max_dt: UserSet<f64>,
+    pub(crate) pv_stdin_timeout: UserSet<Duration>,
+    pub(crate) state_write_interval: UserSet<Option<Duration>>,
+}
+
+impl LoopControls for LoopRuntimeConfig {
+    fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    fn set_interval(&mut self, d: Duration) {
+        self.interval = d;
+    }
+
+    fn max_dt(&self) -> f64 {
+        *self.max_dt.value()
+    }
+
+    fn maybe_set_max_dt(&mut self, v: f64) {
+        self.max_dt.set_if_default(v);
+    }
+
+    fn pv_stdin_timeout(&self) -> Duration {
+        *self.pv_stdin_timeout.value()
+    }
+
+    fn maybe_set_pv_stdin_timeout(&mut self, d: Duration) {
+        self.pv_stdin_timeout.set_if_default(d);
+    }
+
+    fn state_write_interval(&self) -> Option<Duration> {
+        *self.state_write_interval.value()
+    }
+
+    fn maybe_set_state_write_interval(&mut self, d: Option<Duration>) {
+        self.state_write_interval.set_if_default(d);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct LoopArgs {
-    pub(crate) interval: Duration,
+    pub(crate) runtime: LoopRuntimeConfig,
     pub(crate) pv_source: PvSourceConfig,
     pub(crate) cv_sink: Option<CvSinkConfig>,
     pub(crate) pid_config: PidConfig,
@@ -112,13 +159,10 @@ pub(crate) struct LoopArgs {
     pub(crate) cv_fail_after: u32,
     pub(crate) fail_after: Option<u32>,
     pub(crate) min_dt: UserSet<f64>,
-    pub(crate) max_dt: UserSet<f64>,
     pub(crate) dt_clamp: bool,
     pub(crate) log_path: Option<PathBuf>,
     pub(crate) dry_run: bool,
-    pub(crate) pv_stdin_timeout: UserSet<Duration>,
     pub(crate) verify_cv: bool,
-    pub(crate) state_write_interval: UserSet<Option<Duration>>,
     pub(crate) state_fail_after: u32,
     pub(crate) tune: bool,
     pub(crate) tune_history: usize,
@@ -142,7 +186,7 @@ impl LoopArgs {
             pid: self.pid_config.clone(),
             state_store: self.state_path.clone().map(StateStore::new),
             reset_accumulator: self.reset_accumulator,
-            flush_interval: *self.state_write_interval.value(),
+            flush_interval: self.runtime.state_write_interval(),
             state_fail_after: self.state_fail_after,
         }
     }
@@ -159,38 +203,4 @@ pub(crate) struct StatusFlags {
     pub(crate) state_path: Option<PathBuf>,
     #[cfg(unix)]
     pub(crate) socket_path: Option<PathBuf>,
-}
-
-impl LoopControls for LoopArgs {
-    fn interval(&self) -> Duration {
-        self.interval
-    }
-
-    fn set_interval(&mut self, d: Duration) {
-        self.interval = d;
-    }
-
-    fn max_dt(&self) -> f64 {
-        *self.max_dt.value()
-    }
-
-    fn set_max_dt_unless_explicit(&mut self, v: f64) {
-        self.max_dt.set_if_default(v);
-    }
-
-    fn pv_stdin_timeout(&self) -> Duration {
-        *self.pv_stdin_timeout.value()
-    }
-
-    fn set_pv_stdin_timeout_unless_explicit(&mut self, d: Duration) {
-        self.pv_stdin_timeout.set_if_default(d);
-    }
-
-    fn state_write_interval(&self) -> Option<Duration> {
-        *self.state_write_interval.value()
-    }
-
-    fn set_state_write_interval_unless_explicit(&mut self, d: Option<Duration>) {
-        self.state_write_interval.set_if_default(d);
-    }
 }
