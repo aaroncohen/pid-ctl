@@ -120,7 +120,7 @@ fn history_trend_falling() {
     let mut d = VecDeque::new();
     d.push_back(5.0);
     d.push_back(1.0);
-    assert_eq!(super::history_trend(&d), "▼");
+    assert_eq!(history_trend(&d), "▼");
 }
 
 #[test]
@@ -128,13 +128,13 @@ fn history_trend_stable() {
     let mut d = VecDeque::new();
     d.push_back(3.0);
     d.push_back(3.0);
-    assert_eq!(super::history_trend(&d), "→");
+    assert_eq!(history_trend(&d), "→");
 }
 
 #[test]
 fn history_trend_empty_is_stable() {
     let d: VecDeque<f64> = VecDeque::new();
-    assert_eq!(super::history_trend(&d), "→");
+    assert_eq!(history_trend(&d), "→");
 }
 
 #[test]

@@ -168,7 +168,7 @@ impl FilePvSource {
 
 impl PvSource for FilePvSource {
     fn read_pv(&mut self) -> io::Result<f64> {
-        let content = std::fs::read_to_string(&self.path)?;
+        let content = fs::read_to_string(&self.path)?;
         content.trim().parse::<f64>().map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,

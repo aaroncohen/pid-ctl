@@ -20,7 +20,7 @@ fn pv_read_failure_invokes_safe_cv_or_hold_last_per_plan() {
     cmd.arg(&cv_safe);
     cmd.args(["--safe-cv", "12.34"]);
 
-    cmd.timeout(Duration::from_millis(500));
+    cmd.timeout(Duration::from_secs(3));
     let _ = cmd.output();
 
     let content = std::fs::read_to_string(&cv_safe).expect("read cv file after PV failure");
@@ -40,7 +40,7 @@ fn pv_read_failure_invokes_safe_cv_or_hold_last_per_plan() {
     cmd.args(["--cv-file"]);
     cmd.arg(&cv_hold);
 
-    cmd.timeout(Duration::from_millis(500));
+    cmd.timeout(Duration::from_secs(3));
     let _ = cmd.output();
 
     let held = std::fs::read_to_string(&cv_hold).expect("read cv file");

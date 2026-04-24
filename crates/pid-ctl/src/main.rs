@@ -511,7 +511,7 @@ fn sleep_with_socket(
     }
 }
 
-fn run_status(state_path: &std::path::Path) -> Result<(), CliError> {
+fn run_status(state_path: &Path) -> Result<(), CliError> {
     let store = StateStore::new(state_path);
     let snapshot = store
         .load()
@@ -532,7 +532,7 @@ fn run_status(state_path: &std::path::Path) -> Result<(), CliError> {
     Ok(())
 }
 
-fn run_purge(state_path: &std::path::Path) -> Result<(), CliError> {
+fn run_purge(state_path: &Path) -> Result<(), CliError> {
     let store = StateStore::new(state_path);
     let _lock = store
         .acquire_lock()
@@ -575,7 +575,7 @@ fn run_purge(state_path: &std::path::Path) -> Result<(), CliError> {
     Ok(())
 }
 
-fn run_init(state_path: &std::path::Path) -> Result<(), CliError> {
+fn run_init(state_path: &Path) -> Result<(), CliError> {
     let store = StateStore::new(state_path);
     let _lock = store
         .acquire_lock()

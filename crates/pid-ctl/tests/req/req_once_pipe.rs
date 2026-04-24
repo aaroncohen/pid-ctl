@@ -218,7 +218,7 @@ fn pipe_with_scale() {
 /// `pipe --log <path>` appends one NDJSON iteration record per PV line to the log file.
 #[test]
 fn pipe_log_writes_iteration_records() {
-    let dir = tempfile::tempdir().expect("temporary directory");
+    let dir = tempdir().expect("temporary directory");
     let log_path = dir.path().join("pipe.ndjson");
 
     let mut cmd = Command::cargo_bin("pid-ctl").expect("pid-ctl binary");

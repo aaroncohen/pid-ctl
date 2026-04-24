@@ -32,8 +32,5 @@ predicates.workspace = true
 pretty_assertions.workspace = true
 portable-pty.workspace = true
 
-[lints.rust]
-unsafe_code = "forbid"
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
+[lints]
+workspace = true

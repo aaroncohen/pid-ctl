@@ -106,7 +106,7 @@ fn state_fail_after_escalates_to_prominent_warning() {
     use std::process;
 
     // root bypasses chmod permission checks; the test can't simulate write failures.
-    let uid = std::process::Command::new("id")
+    let uid = process::Command::new("id")
         .arg("-u")
         .output()
         .map(|o| o.stdout)
