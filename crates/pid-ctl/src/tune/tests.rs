@@ -547,7 +547,7 @@ fn make_test_ui_state(_args: &super::LoopArgs, terminal_width: u16) -> super::Tu
         help_overlay: false,
         hold: false,
         dry_run: true,
-        last_record: Some(crate::app::IterationRecord {
+        last_record: Some(pid_ctl::app::IterationRecord {
             schema_version: 1,
             ts: "2026-01-01T00:00:00Z".into(),
             name: None,
