@@ -159,22 +159,6 @@ fn loop_cv_fail_after_exits_2() {
     cmd.assert().code(2);
 }
 
-/// pid-ctl-qde: loop with SIGTERM writes safe-cv and exits 0.
-///
-/// Marked `#[ignore]` because it requires sending SIGTERM to the child process,
-/// which is platform-specific and timing-sensitive in CI.  Run manually with
-/// `cargo test -- --ignored loop_shutdown_writes_safe_cv`.
-#[test]
-#[ignore = "requires SIGTERM signal testing — run manually"]
-fn loop_shutdown_writes_safe_cv() {
-    // Implementation would:
-    // 1. Start loop with --safe-cv 0.0 --cv-file <tmp>
-    // 2. Wait for first tick
-    // 3. Send SIGTERM to child PID
-    // 4. Assert exit code 0
-    // 5. Assert cv file contains "0.00"
-}
-
 /// pid-ctl-qde: loop appends NDJSON lines to the log file.
 ///
 /// Marked `#[ignore]` because timing-dependent process-kill approach is racy on

@@ -186,9 +186,7 @@ fn build_plant(kind: PlantKind, o: &HashMap<String, f64>) -> Result<Plant, SimEr
                 t_ambient: g("t_ambient").unwrap_or(20.0),
                 k_heat: g("k_heat").unwrap_or(0.01),
             };
-            let t = g("t")
-                .or_else(|| g("t_initial"))
-                .unwrap_or(params.t_ambient);
+            let t = g("t").unwrap_or(params.t_ambient);
             params.validate()?;
             Ok(Plant::Thermal { params, t })
         }

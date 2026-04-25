@@ -431,15 +431,3 @@ fn ramp_toward(current: f64, target: f64, max_delta: f64) -> f64 {
         current - max_delta
     }
 }
-
-#[cfg(test)]
-mod proptest_smoke {
-    use proptest::prelude::*;
-
-    proptest! {
-        #[test]
-        fn proptest_toolchain_smoke(x in 0i32..10) {
-            prop_assert!((0..10).contains(&x));
-        }
-    }
-}
