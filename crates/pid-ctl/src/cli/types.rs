@@ -5,7 +5,7 @@ use pid_ctl_core::PidConfig;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub(crate) use pid_ctl::app::adapters_build::{CvSinkConfig, PvSourceConfig};
+pub(crate) use pid_ctl::app::adapters_build::{CvMode, CvSinkConfig, LoopPvSource, OncePvSource};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum OutputFormat {
@@ -33,7 +33,7 @@ pub(crate) struct PidFlags {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct OnceArgs {
-    pub(crate) pv_source: PvSourceConfig,
+    pub(crate) pv_source: OncePvSource,
     pub(crate) cmd_timeout: Duration,
     pub(crate) pv_cmd_timeout: Duration,
     pub(crate) dt: f64,
@@ -41,7 +41,7 @@ pub(crate) struct OnceArgs {
     pub(crate) min_dt: f64,
     pub(crate) max_dt: f64,
     pub(crate) output_format: OutputFormat,
-    pub(crate) cv_sink: Option<CvSinkConfig>,
+    pub(crate) cv_mode: CvMode,
     pub(crate) pid_config: PidConfig,
     pub(crate) state_path: Option<PathBuf>,
     pub(crate) name: Option<String>,
@@ -49,7 +49,6 @@ pub(crate) struct OnceArgs {
     pub(crate) scale: f64,
     pub(crate) cv_precision: usize,
     pub(crate) log_path: Option<PathBuf>,
-    pub(crate) dry_run: bool,
 }
 
 impl OnceArgs {
@@ -144,7 +143,7 @@ impl LoopControls for LoopRuntimeConfig {
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct LoopArgs {
     pub(crate) runtime: LoopRuntimeConfig,
-    pub(crate) pv_source: PvSourceConfig,
+    pub(crate) pv_source: LoopPvSource,
     pub(crate) cv_sink: Option<CvSinkConfig>,
     pub(crate) pid_config: PidConfig,
     pub(crate) state_path: Option<PathBuf>,
@@ -177,6 +176,8 @@ pub(crate) struct LoopArgs {
     pub(crate) socket_path: Option<PathBuf>,
     #[cfg(unix)]
     pub(crate) socket_mode: u32,
+    /// Exit after this many completed PID ticks (test hook; `None` = unbounded).
+    pub(crate) max_iterations: Option<u64>,
 }
 
 impl LoopArgs {
@@ -188,6 +189,18 @@ impl LoopArgs {
             reset_accumulator: self.reset_accumulator,
             flush_interval: self.runtime.state_write_interval(),
             state_fail_after: self.state_fail_after,
+        }
+    }
+
+    /// Resolves the CV mode for non-tune execution (`run_loop`).
+    ///
+    /// Parse validation guarantees that `cv_sink.is_none()` implies `dry_run`, so when
+    /// dry-run is active the hardware sink (if any) is ignored. `tune` mode does not use
+    /// this helper — it needs the hardware sink and a mutable dry-run flag independently.
+    pub(crate) fn cv_mode(&self) -> CvMode {
+        match (self.dry_run, self.cv_sink.clone()) {
+            (true, _) | (false, None) => CvMode::DryRun,
+            (false, Some(cfg)) => CvMode::Sink(cfg),
         }
     }
 }

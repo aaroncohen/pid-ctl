@@ -5,8 +5,8 @@ mod tune;
 pub(crate) use cli::*;
 
 use clap::Parser;
-use pid_ctl::adapters::{CvSink, DryRunCvSink, StdoutCvSink};
-use pid_ctl::app::adapters_build::{build_cv_sink, build_pv_source};
+use pid_ctl::adapters::{CvSink, StdoutCvSink};
+use pid_ctl::app::adapters_build::{build_cv_mode_sink, build_loop_pv_source};
 use pid_ctl::app::logger::Logger;
 use pid_ctl::app::loop_runtime::{
     LoopControls, MeasuredDt, apply_measured_dt, emit_state_write_failure, flush_state_at_shutdown,
@@ -21,7 +21,7 @@ use std::path::Path;
 use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[cfg(unix)]
 use pid_ctl::app::socket_dispatch::{SocketSideEffect, handle_socket_request};
@@ -123,17 +123,8 @@ fn open_log(path: Option<&Path>) -> Result<Logger, CliError> {
 fn run_once(args: &OnceArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
-    let mut sink: Box<dyn CvSink> = if args.dry_run {
-        Box::new(DryRunCvSink)
-    } else {
-        build_cv_sink(
-            args.cv_sink
-                .as_ref()
-                .expect("cv_sink required when not dry_run"),
-            args.cv_precision,
-            args.cmd_timeout,
-        )
-    };
+    let mut sink: Box<dyn CvSink> =
+        build_cv_mode_sink(&args.cv_mode, args.cv_precision, args.cmd_timeout);
     let mut logger = open_log(args.log_path.as_deref())?;
 
     let dt = resolve_once_dt(&session, args, &mut logger);
@@ -225,53 +216,23 @@ fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
     let mut session = ControllerSession::new(args.session_config())
         .map_err(|error| CliError::config(error.to_string()))?;
-    let mut pv_source = build_pv_source(
+    let mut pv_source = build_loop_pv_source(
         &args.pv_source,
         args.pv_cmd_timeout,
         args.runtime.pv_stdin_timeout(),
     );
-    let mut cv_sink: Box<dyn CvSink> = if args.dry_run {
-        Box::new(DryRunCvSink)
-    } else {
-        build_cv_sink(
-            args.cv_sink
-                .as_ref()
-                .expect("cv_sink required when not dry_run"),
-            args.cv_precision,
-            args.cmd_timeout,
-        )
-    };
+    let mut cv_sink: Box<dyn CvSink> =
+        build_cv_mode_sink(&args.cv_mode(), args.cv_precision, args.cmd_timeout);
 
     let mut logger = open_log(args.log_path.as_deref())?;
 
-    // Bind socket listener when --socket is set.
     #[cfg(unix)]
-    let socket_listener = if let Some(ref path) = args.socket_path {
-        let listener =
-            pid_ctl::socket::SocketListener::bind(path, args.socket_mode).map_err(|e| match e {
-                pid_ctl::socket::SocketError::AlreadyRunning => CliError::new(
-                    3,
-                    format!("socket {}: another instance is running", path.display()),
-                ),
-                other => CliError::new(1, format!("socket: {other}")),
-            })?;
-        json_events::emit_socket_ready(&mut logger, path.clone());
-        Some(listener)
-    } else {
-        None
-    };
+    let socket_listener = bind_socket_listener(args, &mut logger)?;
 
-    // Set up SIGTERM/SIGINT shutdown flag.
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = Arc::clone(&shutdown);
-    ctrlc::set_handler(move || {
-        shutdown_clone.store(true, Ordering::Relaxed);
-    })
-    .expect("signal handler");
+    let shutdown = install_shutdown_handler();
 
     let mut next_deadline = Instant::now() + args.runtime.interval;
     let mut last_tick = Instant::now();
@@ -282,36 +243,24 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
     loop {
         // Check shutdown flag at top of each iteration.
         if shutdown.load(Ordering::Relaxed) {
-            write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
-            flush_state_at_shutdown(&mut session, args.state_path.as_deref(), &mut logger);
+            finalize_shutdown(args, cv_sink.as_mut(), &mut session, &mut logger);
             break;
         }
 
-        // Sleep until next deadline, servicing socket if active.
-        let now = Instant::now();
-        if now < next_deadline {
+        sleep_until_next_deadline(
+            next_deadline,
             #[cfg(unix)]
-            if let Some(ref listener) = socket_listener {
-                sleep_with_socket(
-                    next_deadline,
-                    listener,
-                    &mut session,
-                    &mut args.runtime,
-                    &mut hold,
-                    &shutdown,
-                    &mut logger,
-                );
-            } else {
-                std::thread::sleep(next_deadline - now);
-            }
-            #[cfg(not(unix))]
-            std::thread::sleep(next_deadline - now);
-        }
+            socket_listener.as_ref(),
+            &mut session,
+            &mut args.runtime,
+            &mut hold,
+            &shutdown,
+            &mut logger,
+        );
 
         // Check shutdown again after sleeping (signal may have arrived during sleep).
         if shutdown.load(Ordering::Relaxed) {
-            write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
-            flush_state_at_shutdown(&mut session, args.state_path.as_deref(), &mut logger);
+            finalize_shutdown(args, cv_sink.as_mut(), &mut session, &mut logger);
             break;
         }
 
@@ -328,64 +277,24 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         let raw_dt = now.duration_since(last_tick).as_secs_f64();
         last_tick = now;
 
-        // Interval slip (plan: Reliability §10 — tick longer than configured `--interval`).
         let interval_secs = args.runtime.interval.as_secs_f64();
-        if raw_dt > interval_secs {
-            if !args.quiet {
-                eprintln!(
-                    "interval slip: tick took {:.0}ms (interval: {:.0}ms)",
-                    raw_dt * 1000.0,
-                    interval_secs * 1000.0
-                );
-            }
-            let interval_ms = millis_round_u64(interval_secs * 1000.0);
-            let actual_ms = millis_round_u64(raw_dt * 1000.0);
-            json_events::emit_interval_slip(&mut logger, interval_ms, actual_ms);
-        }
+        log_interval_slip_if_needed(raw_dt, interval_secs, args.quiet, &mut logger);
 
-        let dt = match apply_measured_dt(
-            raw_dt,
-            *args.min_dt.value(),
-            args.runtime.max_dt(),
-            args.dt_clamp,
-            args.quiet,
-            &mut logger,
-        ) {
-            MeasuredDt::Skip => {
-                handle_dt_skip_state_write(
-                    session.on_dt_skipped(),
-                    &session,
-                    args.state_path.as_deref(),
-                    &mut logger,
-                    args.quiet,
-                );
-                continue;
-            }
-            MeasuredDt::Use(dt) => dt,
+        let Some(dt) = resolve_tick_dt(raw_dt, args, &mut session, &mut logger) else {
+            continue;
         };
 
-        // Read PV.
-        let raw_pv = match pv_source.read_pv() {
-            Ok(pv) => {
-                pv_fail_count = 0;
-                pv
-            }
-            Err(error) => {
-                pv_fail_count += 1;
-                eprintln!("PV read failed: {error}");
-                json_events::emit_pv_read_failure(&mut logger, error.to_string(), args.safe_cv);
-                write_safe_cv(args.safe_cv, cv_sink.as_mut(), &mut session);
-                if let Some(limit) = args.fail_after
-                    && pv_fail_count >= limit
-                {
-                    json_events::emit_pv_fail_after_reached(&mut logger, pv_fail_count, limit);
-                    return Err(CliError::new(
-                        2,
-                        format!("exiting after {pv_fail_count} consecutive PV read failures"),
-                    ));
-                }
-                continue;
-            }
+        let Some(raw_pv) = read_pv_with_escalation(
+            pv_source.as_mut(),
+            &mut pv_fail_count,
+            args.fail_after,
+            args.safe_cv,
+            cv_sink.as_mut(),
+            &mut session,
+            &mut logger,
+        )?
+        else {
+            continue;
         };
 
         let mut observer = LoopObserver {
@@ -409,9 +318,184 @@ fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         {
             return Err(CliError::new(2, msg));
         }
+
+        // Test hook: exit after N successful ticks so tests can synchronize on a
+        // deterministic signal instead of racing a wall-clock kill.
+        if let Some(limit) = args.max_iterations
+            && session.iteration() >= limit
+        {
+            finalize_shutdown(args, cv_sink.as_mut(), &mut session, &mut logger);
+            break;
+        }
     }
 
     Ok(())
+}
+
+/// Binds the optional Unix-socket listener for operator commands.
+#[cfg(unix)]
+fn bind_socket_listener(
+    args: &LoopArgs,
+    logger: &mut Logger,
+) -> Result<Option<pid_ctl::socket::SocketListener>, CliError> {
+    let Some(ref path) = args.socket_path else {
+        return Ok(None);
+    };
+    let listener =
+        pid_ctl::socket::SocketListener::bind(path, args.socket_mode).map_err(|e| match e {
+            pid_ctl::socket::SocketError::AlreadyRunning => CliError::new(
+                3,
+                format!("socket {}: another instance is running", path.display()),
+            ),
+            other => CliError::new(1, format!("socket: {other}")),
+        })?;
+    json_events::emit_socket_ready(logger, path.clone());
+    Ok(Some(listener))
+}
+
+/// Installs the SIGTERM/SIGINT handler and returns the shared shutdown flag.
+fn install_shutdown_handler() -> Arc<AtomicBool> {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    ctrlc::set_handler(move || {
+        shutdown_clone.store(true, Ordering::Relaxed);
+    })
+    .expect("signal handler");
+    shutdown
+}
+
+/// Writes the safe CV and flushes state on shutdown.
+fn finalize_shutdown(
+    args: &LoopArgs,
+    cv_sink: &mut dyn CvSink,
+    session: &mut ControllerSession,
+    logger: &mut Logger,
+) {
+    write_safe_cv(args.safe_cv, cv_sink, session);
+    flush_state_at_shutdown(session, args.state_path.as_deref(), logger);
+}
+
+/// Resolves the tick's effective dt — applying clamp/skip semantics. Returns `None` when
+/// the tick should be skipped (and emits the associated state-write side effects).
+fn resolve_tick_dt(
+    raw_dt: f64,
+    args: &LoopArgs,
+    session: &mut ControllerSession,
+    logger: &mut Logger,
+) -> Option<f64> {
+    match apply_measured_dt(
+        raw_dt,
+        *args.min_dt.value(),
+        args.runtime.max_dt(),
+        args.dt_clamp,
+        args.quiet,
+        logger,
+    ) {
+        MeasuredDt::Skip => {
+            handle_dt_skip_state_write(
+                session.on_dt_skipped(),
+                session,
+                args.state_path.as_deref(),
+                logger,
+                args.quiet,
+            );
+            None
+        }
+        MeasuredDt::Use(dt) => Some(dt),
+    }
+}
+
+/// Sleeps until `next_deadline`, servicing the optional socket listener in small
+/// chunks so operator commands remain responsive while the loop waits for its tick.
+fn sleep_until_next_deadline(
+    next_deadline: Instant,
+    #[cfg(unix)] socket_listener: Option<&pid_ctl::socket::SocketListener>,
+    session: &mut ControllerSession,
+    runtime: &mut LoopRuntimeConfig,
+    hold: &mut bool,
+    shutdown: &AtomicBool,
+    logger: &mut Logger,
+) {
+    let now = Instant::now();
+    if now >= next_deadline {
+        return;
+    }
+
+    #[cfg(unix)]
+    if let Some(listener) = socket_listener {
+        sleep_with_socket(
+            next_deadline,
+            listener,
+            session,
+            runtime,
+            hold,
+            shutdown,
+            logger,
+        );
+        return;
+    }
+
+    // Fallback for non-unix or when no socket is bound — unused locals suppressed.
+    let _ = (session, runtime, hold, shutdown, logger);
+    std::thread::sleep(next_deadline - now);
+}
+
+/// Reads a PV sample, applying the safe-CV and escalation policy on failure.
+///
+/// Returns `Ok(Some(pv))` when a PV was read, `Ok(None)` when the caller should
+/// `continue` to the next tick, or `Err` when the failure limit was reached.
+fn read_pv_with_escalation(
+    pv_source: &mut dyn pid_ctl::adapters::PvSource,
+    pv_fail_count: &mut u32,
+    fail_after: Option<u32>,
+    safe_cv: Option<f64>,
+    cv_sink: &mut dyn CvSink,
+    session: &mut ControllerSession,
+    logger: &mut Logger,
+) -> Result<Option<f64>, CliError> {
+    match pv_source.read_pv() {
+        Ok(pv) => {
+            *pv_fail_count = 0;
+            Ok(Some(pv))
+        }
+        Err(error) => {
+            *pv_fail_count += 1;
+            eprintln!("PV read failed: {error}");
+            json_events::emit_pv_read_failure(logger, error.to_string(), safe_cv);
+            write_safe_cv(safe_cv, cv_sink, session);
+            if let Some(limit) = fail_after
+                && *pv_fail_count >= limit
+            {
+                json_events::emit_pv_fail_after_reached(logger, *pv_fail_count, limit);
+                return Err(CliError::new(
+                    2,
+                    format!(
+                        "exiting after {count} consecutive PV read failures",
+                        count = *pv_fail_count
+                    ),
+                ));
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Emits the interval-slip event when a tick took longer than the configured interval
+/// (plan: Reliability §10).
+fn log_interval_slip_if_needed(raw_dt: f64, interval_secs: f64, quiet: bool, logger: &mut Logger) {
+    if raw_dt <= interval_secs {
+        return;
+    }
+    if !quiet {
+        eprintln!(
+            "interval slip: tick took {:.0}ms (interval: {:.0}ms)",
+            raw_dt * 1000.0,
+            interval_secs * 1000.0
+        );
+    }
+    let interval_ms = millis_round_u64(interval_secs * 1000.0);
+    let actual_ms = millis_round_u64(raw_dt * 1000.0);
+    json_events::emit_interval_slip(logger, interval_ms, actual_ms);
 }
 
 struct LoopObserver {
@@ -491,7 +575,7 @@ fn sleep_with_socket(
         if now >= until || shutdown.load(Ordering::Relaxed) {
             break;
         }
-        let chunk = (until - now).min(Duration::from_millis(50));
+        let chunk = (until - now).min(app::defaults::SOCKET_SLEEP_CHUNK);
         std::thread::sleep(chunk);
 
         for _ in 0..10 {

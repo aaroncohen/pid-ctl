@@ -1,12 +1,16 @@
 use super::raw::{LoopRawArgs, OnceRawArgs, PipeRawArgs, StatusRawArgs};
 use super::types::{
-    CvSinkConfig, LoopArgs, LoopRuntimeConfig, OnceArgs, OutputFormat, PidFlags, PipeArgs,
-    PvSourceConfig, SetArgs, StatusFlags,
+    CvMode, CvSinkConfig, LoopArgs, LoopPvSource, LoopRuntimeConfig, OnceArgs, OncePvSource,
+    OutputFormat, PidFlags, PipeArgs, SetArgs, StatusFlags,
 };
 use super::user_set::UserSet;
 use crate::CliError;
 use pid_ctl::adapters::{CmdPvSource, FilePvSource, PvSource};
 use pid_ctl::app::StateStore;
+use pid_ctl::app::defaults::{
+    ANTI_WINDUP_TT_INTERVAL_MULTIPLIER, DEFAULT_CMD_TIMEOUT_CAP, MAX_DT_DEFAULT,
+    MAX_DT_INTERVAL_MULTIPLIER, MIN_DT_DEFAULT, MIN_STATE_FLUSH,
+};
 use pid_ctl_core::{AntiWindupStrategy, PidConfig};
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
@@ -89,6 +93,11 @@ pub(crate) fn parse_once(raw: &OnceRawArgs) -> Result<OnceArgs, CliError> {
         apply_verify_cv(sink, raw.cv.verify_cv);
     }
 
+    let cv_mode = match (raw.dry_run, cv_sink) {
+        (true, _) | (false, None) => CvMode::DryRun,
+        (false, Some(cfg)) => CvMode::Sink(cfg),
+    };
+
     let (dt, dt_explicit) = if let Some(v) = raw.common.dt {
         (v, true)
     } else {
@@ -101,10 +110,10 @@ pub(crate) fn parse_once(raw: &OnceRawArgs) -> Result<OnceArgs, CliError> {
         pv_cmd_timeout,
         dt,
         dt_explicit,
-        min_dt: raw.common.min_dt.unwrap_or(0.01),
-        max_dt: raw.common.max_dt.unwrap_or(60.0),
+        min_dt: raw.common.min_dt.unwrap_or(MIN_DT_DEFAULT),
+        max_dt: raw.common.max_dt.unwrap_or(MAX_DT_DEFAULT),
         output_format,
-        cv_sink,
+        cv_mode,
         pid_config,
         state_path: raw.common.state.clone(),
         name: raw.common.name.clone(),
@@ -112,7 +121,6 @@ pub(crate) fn parse_once(raw: &OnceRawArgs) -> Result<OnceArgs, CliError> {
         scale: raw.common.scale.unwrap_or(1.0),
         cv_precision: raw.common.cv_precision.unwrap_or(2) as usize,
         log_path: raw.common.log.clone(),
-        dry_run: raw.dry_run,
     })
 }
 
@@ -208,7 +216,7 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
                 "--tune and --quiet are incompatible — tune requires a TTY",
             ));
         }
-        if matches!(pv_source, PvSourceConfig::Stdin) {
+        if matches!(pv_source, LoopPvSource::Stdin) {
             return Err(CliError::config(
                 "--tune cannot be used with --pv-stdin — stdin is used for the tuning dashboard",
             ));
@@ -250,25 +258,22 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
     let pid_flags = raw.pid.to_pid_flags()?;
     let mut pid_config = resolve_pid_config(&pid_flags, raw.common.state.as_deref())?;
 
-    // Default max_dt is 3×interval or 60.0 if interval is very large.
     let interval_secs = interval.as_secs_f64();
 
-    // Set tt_upper_bound from interval.
     if raw.pid.anti_windup_tt.is_none() {
-        pid_config.tt_upper_bound = Some(100.0 * interval_secs);
+        pid_config.tt_upper_bound = Some(ANTI_WINDUP_TT_INTERVAL_MULTIPLIER * interval_secs);
     }
-    let max_dt_default = (interval_secs * 3.0).min(60.0);
-    // Ensure max_dt_default is never below min_dt default (0.01).
-    let max_dt_default = max_dt_default.max(0.01);
+    let max_dt_default =
+        (interval_secs * MAX_DT_INTERVAL_MULTIPLIER).clamp(MIN_DT_DEFAULT, MAX_DT_DEFAULT);
 
     let pv_stdin_timeout = raw
         .pv
         .pv_stdin_timeout
         .map_or_else(|| UserSet::Default(interval), UserSet::Explicit);
 
-    // Default cmd-timeout: min(interval, 30s).
+    // Default cmd-timeout: min(interval, DEFAULT_CMD_TIMEOUT_CAP).
     let effective_cmd_timeout = raw.common.cmd_timeout.map_or_else(
-        || interval.min(Duration::from_secs(30)),
+        || interval.min(DEFAULT_CMD_TIMEOUT_CAP),
         Duration::from_secs_f64,
     );
     let pv_cmd_timeout = raw
@@ -276,9 +281,8 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
         .pv_cmd_timeout
         .map_or(effective_cmd_timeout, Duration::from_secs_f64);
 
-    // Default state_write_interval for loop: max(tick_interval, 100ms).
-    let min_flush = Duration::from_millis(100);
-    let default_state_write_interval = interval.max(min_flush);
+    // Default state_write_interval for loop: max(tick_interval, MIN_STATE_FLUSH).
+    let default_state_write_interval = interval.max(MIN_STATE_FLUSH);
     let state_write_interval = raw.common.state_write_interval.map_or_else(
         || UserSet::Default(Some(default_state_write_interval)),
         |t| UserSet::Explicit(Some(t)),
@@ -345,6 +349,7 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
         socket_path,
         #[cfg(unix)]
         socket_mode,
+        max_iterations: raw.max_iterations,
     })
 }
 
@@ -485,12 +490,11 @@ pub(crate) const fn apply_verify_cv(cv_sink: &mut CvSinkConfig, verify: bool) {
     }
 }
 
-pub(crate) fn resolve_pv(source: &PvSourceConfig, cmd_timeout: Duration) -> io::Result<f64> {
+pub(crate) fn resolve_pv(source: &OncePvSource, cmd_timeout: Duration) -> io::Result<f64> {
     match source {
-        PvSourceConfig::Literal(v) => Ok(*v),
-        PvSourceConfig::File(path) => FilePvSource::new(path.clone()).read_pv(),
-        PvSourceConfig::Cmd(cmd) => CmdPvSource::new(cmd.clone(), cmd_timeout).read_pv(),
-        PvSourceConfig::Stdin => unreachable!("--pv-stdin is only valid for loop, not once"),
+        OncePvSource::Literal(v) => Ok(*v),
+        OncePvSource::File(path) => FilePvSource::new(path.clone()).read_pv(),
+        OncePvSource::Cmd(cmd) => CmdPvSource::new(cmd.clone(), cmd_timeout).read_pv(),
     }
 }
 

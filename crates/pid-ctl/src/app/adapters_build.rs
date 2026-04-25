@@ -1,19 +1,32 @@
 //! PV source and CV sink configuration enums plus their builder functions.
 //!
-//! `PvSourceConfig` and `CvSinkConfig` live here so the library can own
-//! `build_pv_source` / `build_cv_sink` without depending on the binary's CLI types.
+//! `OncePvSource`, `LoopPvSource`, and `CvSinkConfig` live here so the library can own
+//! `build_loop_pv_source` / `build_cv_sink` without depending on the binary's CLI types.
 //! The binary's `cli/types.rs` re-exports them.
+//!
+//! PV sources are split per subcommand so the type system encodes which inputs are valid
+//! for each mode: `once` accepts a literal, a file, or a command; `loop` accepts a file,
+//! a command, or stdin. This removes the runtime `unreachable!()` panics that would fire
+//! if CLI validation ever missed a case.
 
 use crate::adapters::{
-    CmdCvSink, CmdPvSource, CvSink, FileCvSink, FilePvSource, PvSource, StdinPvSource, StdoutCvSink,
+    CmdCvSink, CmdPvSource, CvSink, DryRunCvSink, FileCvSink, FilePvSource, PvSource,
+    StdinPvSource, StdoutCvSink,
 };
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Which PV source was specified on the CLI.
+/// PV source accepted by the `once` subcommand (no stdin — `once` reads PV once).
 #[derive(Clone, Debug, PartialEq)]
-pub enum PvSourceConfig {
+pub enum OncePvSource {
     Literal(f64),
+    File(PathBuf),
+    Cmd(String),
+}
+
+/// PV source accepted by the `loop` subcommand (no literal — `loop` reads PV every tick).
+#[derive(Clone, Debug, PartialEq)]
+pub enum LoopPvSource {
     File(PathBuf),
     Cmd(String),
     /// `loop --pv-stdin`: one line per tick, with a per-tick timeout.
@@ -33,17 +46,39 @@ pub enum CvSinkConfig {
     },
 }
 
+/// What to do with computed CV values.
+///
+/// Either discard (dry-run) or forward to a configured sink. Parse-time
+/// validation rejects the invalid fourth state (no sink, no dry-run), so
+/// matching is total and the runtime cannot hit an `unwrap`/`expect`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CvMode {
+    DryRun,
+    Sink(CvSinkConfig),
+}
+
 #[must_use]
-pub fn build_pv_source(
-    source: &PvSourceConfig,
+pub fn build_loop_pv_source(
+    source: &LoopPvSource,
     cmd_timeout: Duration,
     pv_stdin_timeout: Duration,
 ) -> Box<dyn PvSource> {
     match source {
-        PvSourceConfig::Literal(_) => unreachable!("loop rejects literal PV"),
-        PvSourceConfig::File(path) => Box::new(FilePvSource::new(path.clone())),
-        PvSourceConfig::Cmd(cmd) => Box::new(CmdPvSource::new(cmd.clone(), cmd_timeout)),
-        PvSourceConfig::Stdin => Box::new(StdinPvSource::new(pv_stdin_timeout)),
+        LoopPvSource::File(path) => Box::new(FilePvSource::new(path.clone())),
+        LoopPvSource::Cmd(cmd) => Box::new(CmdPvSource::new(cmd.clone(), cmd_timeout)),
+        LoopPvSource::Stdin => Box::new(StdinPvSource::new(pv_stdin_timeout)),
+    }
+}
+
+#[must_use]
+pub fn build_cv_mode_sink(
+    cv_mode: &CvMode,
+    precision: usize,
+    default_cmd_timeout: Duration,
+) -> Box<dyn CvSink> {
+    match cv_mode {
+        CvMode::DryRun => Box::new(DryRunCvSink),
+        CvMode::Sink(cfg) => build_cv_sink(cfg, precision, default_cmd_timeout),
     }
 }
 

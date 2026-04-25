@@ -10,14 +10,10 @@ use tempfile::tempdir;
 
 /// pid-ctl-cv1: loop runs continuously, advances iter, and writes state.
 ///
-/// Creates a temp PV file, runs loop with a very short interval, kills after
-/// ~300 ms, then checks the state file has iter >= 2.
-///
-/// Marked `#[ignore]` because the process-timing approach (kill after N ms) is
-/// inherently racy on slow/loaded CI machines and can produce iter == 1 or flap.
-/// Run manually with `cargo test -- --ignored loop_basic_iterations`.
+/// Uses `--max-iterations 3` (a hidden test hook) so the child exits on its own
+/// after three completed PID ticks. This replaces the earlier kill-after-N-ms
+/// approach, which was inherently racy on slow/loaded CI machines.
 #[test]
-#[ignore = "timing-sensitive: kill after 300 ms may land before 2 ticks on slow machines"]
 fn loop_basic_iterations() {
     let dir = tempdir().expect("temporary directory");
     let pv_path = dir.path().join("pv.txt");
@@ -37,17 +33,16 @@ fn loop_basic_iterations() {
         "50ms",
         "--cv-file",
         "/dev/null",
+        "--max-iterations",
+        "3",
         "--state",
     ]);
     cmd.arg(&state_path);
 
-    // Run for up to 500 ms then kill.
-    cmd.timeout(Duration::from_millis(500));
+    // Generous ceiling so the slowest CI runners still get a clean self-exit.
+    cmd.timeout(Duration::from_secs(10));
+    cmd.assert().success();
 
-    // Process will be killed (non-zero exit) — that's expected.
-    let _ = cmd.output();
-
-    // State file should exist and iter should be >= 2.
     assert!(
         state_path.exists(),
         "state file should exist after loop ran"
@@ -59,8 +54,8 @@ fn loop_basic_iterations() {
         .expect("snapshot present");
 
     assert!(
-        snapshot.iter >= 2,
-        "expected iter >= 2 after ~300 ms at 50 ms interval, got {}",
+        snapshot.iter >= 3,
+        "expected iter >= 3 after --max-iterations 3, got {}",
         snapshot.iter
     );
 }

@@ -1,5 +1,5 @@
 use super::parse::parse_duration_flag;
-use super::types::{CvSinkConfig, PidFlags, PvSourceConfig};
+use super::types::{CvSinkConfig, LoopPvSource, OncePvSource, PidFlags};
 use crate::CliError;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use pid_ctl_core::AntiWindupStrategy;
@@ -349,7 +349,7 @@ pub(super) struct OncePvRawArgs {
 }
 
 impl OncePvRawArgs {
-    pub(super) fn to_pv_source_config(&self) -> Result<Option<PvSourceConfig>, CliError> {
+    pub(super) fn to_pv_source_config(&self) -> Result<Option<OncePvSource>, CliError> {
         // Reject flags invalid for once.
         if self.pv_stdin {
             return Err(CliError::config(
@@ -374,14 +374,14 @@ impl OncePvRawArgs {
         }
 
         if let Some(&v) = self.pv.first() {
-            Ok(Some(PvSourceConfig::Literal(v)))
+            Ok(Some(OncePvSource::Literal(v)))
         } else if let Some(ref path) = self.pv_file {
-            Ok(Some(PvSourceConfig::File(path.clone())))
+            Ok(Some(OncePvSource::File(path.clone())))
         } else {
             Ok(self
                 .pv_cmd
                 .as_ref()
-                .map(|cmd| PvSourceConfig::Cmd(cmd.clone())))
+                .map(|cmd| OncePvSource::Cmd(cmd.clone())))
         }
     }
 }
@@ -414,7 +414,7 @@ pub(super) struct LoopPvRawArgs {
 }
 
 impl LoopPvRawArgs {
-    pub(super) fn to_pv_source_config(&self) -> Result<Option<PvSourceConfig>, CliError> {
+    pub(super) fn to_pv_source_config(&self) -> Result<Option<LoopPvSource>, CliError> {
         // loop does not accept --pv <literal>
         if self.pv.is_some() {
             return Err(CliError::config(
@@ -438,11 +438,11 @@ impl LoopPvRawArgs {
         }
 
         if let Some(ref path) = self.pv_file {
-            Ok(Some(PvSourceConfig::File(path.clone())))
+            Ok(Some(LoopPvSource::File(path.clone())))
         } else if let Some(ref cmd) = self.pv_cmd {
-            Ok(Some(PvSourceConfig::Cmd(cmd.clone())))
+            Ok(Some(LoopPvSource::Cmd(cmd.clone())))
         } else if self.pv_stdin {
-            Ok(Some(PvSourceConfig::Stdin))
+            Ok(Some(LoopPvSource::Stdin))
         } else {
             Ok(None)
         }
@@ -625,6 +625,10 @@ pub(crate) struct LoopRawArgs {
     #[cfg(unix)]
     #[arg(long, value_parser = parse_octal_mode)]
     pub(super) socket_mode: Option<u32>,
+
+    /// Exit cleanly after this many successful PID ticks (test hook; hidden).
+    #[arg(long, hide = true)]
+    pub(super) max_iterations: Option<u64>,
 }
 
 /// `pipe` — read PV from stdin, emit CV to stdout.

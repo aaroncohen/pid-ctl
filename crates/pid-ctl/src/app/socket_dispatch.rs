@@ -33,7 +33,7 @@ pub fn handle_socket_request(
             (
                 Response::Status {
                     ok: true,
-                    iter: session.iter(),
+                    iter: session.iteration(),
                     pv: session.last_pv().unwrap_or(0.0),
                     sp: cfg.setpoint,
                     err: session.last_error().unwrap_or(0.0),
@@ -52,7 +52,7 @@ pub fn handle_socket_request(
         Request::Reset => {
             let i_acc_before = session.i_acc();
             session.reset_integral();
-            json_events::emit_integral_reset(logger, i_acc_before, session.iter(), "socket");
+            json_events::emit_integral_reset(logger, i_acc_before, session.iteration(), "socket");
             (
                 Response::Reset {
                     ok: true,
@@ -143,7 +143,7 @@ fn apply_gain_param(
         session.config().ki,
         session.config().kd,
         session.config().setpoint,
-        session.iter(),
+        session.iteration(),
         "socket",
     );
     old
@@ -196,7 +196,7 @@ fn handle_socket_set(
                 session.config().ki,
                 session.config().kd,
                 value,
-                session.iter(),
+                session.iteration(),
                 "socket",
             );
             (
