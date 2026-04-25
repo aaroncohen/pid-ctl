@@ -4,7 +4,7 @@
 use assert_cmd::Command;
 use predicates::str::contains;
 
-// --- Bugs: these test plan-required rejections that the CLI currently fails to enforce ---
+// --- CLI validation: plan-required rejections enforced at parse time ---
 
 /// pid-ctl-s4z: pipe + --pv must exit 3.
 /// Plan: "pipe reads PV from stdin intrinsically — PV source flags are not accepted"
@@ -41,7 +41,7 @@ fn duplicate_pv_flags_rejected() {
         .stderr(contains("only one PV source may be specified"));
 }
 
-// --- Unimplemented: --scale and --cv-precision (pid-ctl-7q1) ---
+// --- PV/CV formatting: --scale and --cv-precision (pid-ctl-7q1) ---
 
 /// pid-ctl-7q1: --scale multiplies raw PV before filtering or PID.
 #[test]

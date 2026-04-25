@@ -47,13 +47,8 @@ fn spark_marker_row_places_pipe_at_tick_column() {
     assert_eq!(row.chars().nth(3), Some('|'));
 }
 
-/// Regression test: sparkline slots must use Fill so they never overflow their parent
-/// in ratatui 0.30's layout engine (which replaced cassowary with kasuari).
-///
-/// Previously they used `Constraint::Length(2)` — fixed slots that summed to more rows
-/// than the parent had, causing the layout to overflow and widgets to overlap content
-/// above them.  Now they use `Constraint::Fill(1)` which distributes remaining height
-/// proportionally and is guaranteed to never overflow.
+/// Regression: sparkline slots must use `Constraint::Fill` so they cannot overflow
+/// their parent in ratatui's layout engine.
 #[test]
 fn sparkline_constraints_use_fill() {
     use ratatui::layout::Constraint;
