@@ -38,7 +38,7 @@ use export::{export_line_stderr, flush_shutdown};
 use input::{handle_command_key, handle_normal_key};
 use model::{TUNE_IDLE_DRAW_DEADLINE_NEAR, TUNE_IDLE_DRAW_MIN, TuneUiState};
 use pid_ctl::adapters::{CvSink, DryRunCvSink};
-use pid_ctl::app::adapters_build::{build_cv_sink, build_pv_source};
+use pid_ctl::app::adapters_build::{build_cv_sink, build_loop_pv_source};
 use pid_ctl::app::logger::Logger;
 use pid_ctl::app::loop_runtime::{
     LoopControls, MeasuredDt, apply_measured_dt, emit_state_write_failure,
@@ -69,7 +69,7 @@ pub(crate) fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliErr
     ui.last_kd = cfg0.kd;
     ui.last_sp = cfg0.setpoint;
 
-    let mut pv_source = build_pv_source(
+    let mut pv_source = build_loop_pv_source(
         &args.pv_source,
         args.pv_cmd_timeout,
         args.runtime.pv_stdin_timeout(),

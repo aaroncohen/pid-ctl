@@ -4,6 +4,7 @@
 //! each tick to service operator commands (status, set, reset, hold, resume,
 //! save) without interrupting the control cadence.
 
+use crate::app::defaults::SOCKET_IO_TIMEOUT;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
@@ -216,8 +217,8 @@ impl SocketListener {
             Ok(pair) => pair,
         };
 
-        stream.set_read_timeout(Some(Duration::from_millis(500)))?;
-        stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+        stream.set_read_timeout(Some(SOCKET_IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT))?;
 
         let mut buf = Vec::new();
         let bytes_read = (&stream)

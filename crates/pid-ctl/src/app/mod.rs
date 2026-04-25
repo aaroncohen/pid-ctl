@@ -1,6 +1,7 @@
 //! Controller session scaffolding and persistence primitives for the application layer.
 
 pub mod adapters_build;
+pub mod defaults;
 pub mod logger;
 pub mod loop_runtime;
 pub mod snapshot_persister;
@@ -126,8 +127,7 @@ impl ControllerSession {
 
     /// Current iteration count from the snapshot.
     #[must_use]
-    #[allow(clippy::iter_not_returning_iterator)]
-    pub const fn iter(&self) -> u64 {
+    pub const fn iteration(&self) -> u64 {
         self.snapshot.iter
     }
 

@@ -2,6 +2,9 @@
 //! reporting, and the [`LoopControls`] abstraction used by both the main loop and socket dispatch.
 
 use crate::adapters::CvSink;
+use crate::app::defaults::{
+    MAX_DT_DEFAULT, MAX_DT_INTERVAL_MULTIPLIER, MIN_DT_DEFAULT, MIN_STATE_FLUSH,
+};
 use crate::app::logger::Logger;
 use crate::app::{ControllerSession, StateStoreError};
 use crate::json_events;
@@ -42,10 +45,10 @@ pub fn apply_runtime_interval(
 ) {
     controls.set_interval(new_interval);
     let s = new_interval.as_secs_f64();
-    controls.maybe_set_max_dt((s * 3.0_f64).clamp(0.01, 60.0));
+    controls
+        .maybe_set_max_dt((s * MAX_DT_INTERVAL_MULTIPLIER).clamp(MIN_DT_DEFAULT, MAX_DT_DEFAULT));
     controls.maybe_set_pv_stdin_timeout(new_interval);
-    let min_flush = Duration::from_millis(100);
-    controls.maybe_set_state_write_interval(Some(new_interval.max(min_flush)));
+    controls.maybe_set_state_write_interval(Some(new_interval.max(MIN_STATE_FLUSH)));
     session.set_flush_interval(controls.state_write_interval());
 }
 

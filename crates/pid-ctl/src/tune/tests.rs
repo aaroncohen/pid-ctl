@@ -490,7 +490,7 @@ fn test_loop_args(config: pid_ctl_core::PidConfig) -> super::LoopArgs {
             pv_stdin_timeout: crate::cli::user_set::UserSet::Default(Duration::from_secs(5)),
             state_write_interval: crate::cli::user_set::UserSet::Default(None),
         },
-        pv_source: pid_ctl::app::adapters_build::PvSourceConfig::Literal(0.0),
+        pv_source: pid_ctl::app::adapters_build::LoopPvSource::Cmd("echo 0".into()),
         cv_sink: None,
         pid_config: config,
         state_path: None,
@@ -523,6 +523,7 @@ fn test_loop_args(config: pid_ctl_core::PidConfig) -> super::LoopArgs {
         socket_path: None,
         #[cfg(unix)]
         socket_mode: 0o660,
+        max_iterations: None,
     }
 }
 
