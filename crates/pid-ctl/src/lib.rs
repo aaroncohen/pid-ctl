@@ -15,6 +15,7 @@
 
 pub mod adapters;
 pub mod app;
+pub mod autotune;
 pub mod json_events;
 pub mod schedule;
 #[cfg(unix)]

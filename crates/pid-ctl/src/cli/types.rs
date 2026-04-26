@@ -1,6 +1,7 @@
 use crate::cli::user_set::UserSet;
 use pid_ctl::app::loop_runtime::LoopControls;
 use pid_ctl::app::{SessionConfig, StateStore};
+use pid_ctl::autotune::TuningRule;
 use pid_ctl_core::PidConfig;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -216,4 +217,21 @@ pub(crate) struct StatusFlags {
     pub(crate) state_path: Option<PathBuf>,
     #[cfg(unix)]
     pub(crate) socket_path: Option<PathBuf>,
+}
+
+/// Parsed and validated arguments for the `autotune` subcommand.
+#[derive(Clone, Debug)]
+pub(crate) struct AutotuneArgs {
+    pub(crate) pv_cmd: String,
+    pub(crate) cv_cmd: String,
+    pub(crate) bias: f64,
+    pub(crate) amp: f64,
+    pub(crate) duration: Duration,
+    pub(crate) rule: TuningRule,
+    pub(crate) out_min: f64,
+    pub(crate) out_max: f64,
+    pub(crate) interval: Duration,
+    pub(crate) cmd_timeout: Duration,
+    pub(crate) cv_precision: usize,
+    pub(crate) state: Option<PathBuf>,
 }

@@ -1,7 +1,7 @@
-use super::raw::{LoopRawArgs, OnceRawArgs, PipeRawArgs, StatusRawArgs};
+use super::raw::{AutotuneRawArgs, LoopRawArgs, OnceRawArgs, PipeRawArgs, StatusRawArgs};
 use super::types::{
-    CvMode, CvSinkConfig, LoopArgs, LoopPvSource, LoopRuntimeConfig, OnceArgs, OncePvSource,
-    OutputFormat, PidFlags, PipeArgs, SetArgs, StatusFlags,
+    AutotuneArgs, CvMode, CvSinkConfig, LoopArgs, LoopPvSource, LoopRuntimeConfig, OnceArgs,
+    OncePvSource, OutputFormat, PidFlags, PipeArgs, SetArgs, StatusFlags,
 };
 use super::user_set::UserSet;
 use crate::CliError;
@@ -496,6 +496,47 @@ pub(crate) fn resolve_pv(source: &OncePvSource, cmd_timeout: Duration) -> io::Re
         OncePvSource::File(path) => FilePvSource::new(path.clone()).read_pv(),
         OncePvSource::Cmd(cmd) => CmdPvSource::new(cmd.clone(), cmd_timeout).read_pv(),
     }
+}
+
+/// Minimum allowed autotune duration.
+const AUTOTUNE_MIN_DURATION_SECS: f64 = 10.0;
+
+pub(crate) fn parse_autotune(raw: &AutotuneRawArgs) -> Result<AutotuneArgs, CliError> {
+    let duration_secs = raw.duration.as_secs_f64();
+    if duration_secs < AUTOTUNE_MIN_DURATION_SECS {
+        return Err(CliError::config(format!(
+            "--duration must be at least {AUTOTUNE_MIN_DURATION_SECS}s for a meaningful relay test, got {duration_secs:.1}s"
+        )));
+    }
+
+    let cmd_timeout = raw
+        .cmd_timeout
+        .map_or(raw.interval.min(Duration::from_secs(5)), |s| {
+            Duration::from_secs_f64(s)
+        });
+
+    let cfg = pid_ctl::autotune::AutotuneConfig {
+        bias: raw.bias,
+        amp: raw.amp,
+        out_min: raw.out_min,
+        out_max: raw.out_max,
+    };
+    cfg.validate().map_err(CliError::config)?;
+
+    Ok(AutotuneArgs {
+        pv_cmd: raw.pv_cmd.clone(),
+        cv_cmd: raw.cv_cmd.clone(),
+        bias: raw.bias,
+        amp: raw.amp,
+        duration: raw.duration,
+        rule: raw.rule.clone().into(),
+        out_min: raw.out_min,
+        out_max: raw.out_max,
+        interval: raw.interval,
+        cmd_timeout,
+        cv_precision: raw.cv_precision as usize,
+        state: raw.state.clone(),
+    })
 }
 
 pub(crate) fn parse_f64_value(flag: &str, value: &str) -> Result<f64, CliError> {
