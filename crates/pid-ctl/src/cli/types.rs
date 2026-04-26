@@ -217,3 +217,13 @@ pub(crate) struct StatusFlags {
     #[cfg(unix)]
     pub(crate) socket_path: Option<PathBuf>,
 }
+
+pub(crate) struct ReplayArgs {
+    pub(crate) log_path: PathBuf,
+    pub(crate) pid_config: PidConfig,
+    /// `true` when `--setpoint` was explicitly provided on the CLI; `false` means
+    /// the setpoint will be read from the first iteration record in the log.
+    pub(crate) setpoint_from_cli: bool,
+    pub(crate) output_log: Option<PathBuf>,
+    pub(crate) diff: bool,
+}
