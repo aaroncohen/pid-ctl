@@ -63,6 +63,8 @@ pub(crate) enum SubCommand {
     Loop(LoopRawArgs),
     /// Read PV lines from stdin and emit CV to stdout
     Pipe(PipeRawArgs),
+    /// Re-run PID over a recorded NDJSON log with new gains
+    Replay(ReplayRawArgs),
     /// Show controller status
     Status(StatusRawArgs),
     /// Send a set command via socket
@@ -689,4 +691,23 @@ pub(crate) struct StateOnlyArgs {
     /// Path to state file
     #[arg(long)]
     pub(crate) state: Option<PathBuf>,
+}
+
+/// `replay` — re-run the PID controller against a recorded NDJSON log.
+#[derive(Args, Clone, Debug)]
+pub(crate) struct ReplayRawArgs {
+    /// Input NDJSON log file (produced by --log)
+    #[arg(long, required = true)]
+    pub(super) log: PathBuf,
+
+    #[command(flatten)]
+    pub(super) pid: PidRawArgs,
+
+    /// Write replayed NDJSON records to this file
+    #[arg(long)]
+    pub(super) output_log: Option<PathBuf>,
+
+    /// Print CV delta summary (max diff, RMS diff) to stdout
+    #[arg(long)]
+    pub(super) diff: bool,
 }

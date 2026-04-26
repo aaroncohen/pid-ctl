@@ -4,6 +4,7 @@ pub mod adapters_build;
 pub mod defaults;
 pub mod logger;
 pub mod loop_runtime;
+pub mod replay;
 pub mod snapshot_persister;
 #[cfg(unix)]
 pub mod socket_dispatch;

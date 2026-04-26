@@ -34,6 +34,8 @@ mod req_pv_source;
 mod req_pv_stdin_verify_cv;
 #[path = "req/req_reliability.rs"]
 mod req_reliability;
+#[path = "req/req_replay.rs"]
+mod req_replay;
 #[path = "req/req_sim_loop.rs"]
 mod req_sim_loop;
 #[path = "req/req_socket.rs"]

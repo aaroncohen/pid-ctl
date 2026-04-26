@@ -1,7 +1,7 @@
-use super::raw::{LoopRawArgs, OnceRawArgs, PipeRawArgs, StatusRawArgs};
+use super::raw::{LoopRawArgs, OnceRawArgs, PipeRawArgs, ReplayRawArgs, StatusRawArgs};
 use super::types::{
     CvMode, CvSinkConfig, LoopArgs, LoopPvSource, LoopRuntimeConfig, OnceArgs, OncePvSource,
-    OutputFormat, PidFlags, PipeArgs, SetArgs, StatusFlags,
+    OutputFormat, PidFlags, PipeArgs, ReplayArgs, SetArgs, StatusFlags,
 };
 use super::user_set::UserSet;
 use crate::CliError;
@@ -501,5 +501,41 @@ pub(crate) fn resolve_pv(source: &OncePvSource, cmd_timeout: Duration) -> io::Re
 pub(crate) fn parse_f64_value(flag: &str, value: &str) -> Result<f64, CliError> {
     value.parse::<f64>().map_err(|error| {
         CliError::config(format!("{flag} expects a float, got `{value}`: {error}"))
+    })
+}
+
+pub(crate) fn parse_replay(raw: &ReplayRawArgs) -> Result<ReplayArgs, CliError> {
+    let pid_flags = raw.pid.to_pid_flags()?;
+    let setpoint_from_cli = pid_flags.setpoint.is_some();
+    let defaults = PidConfig::default();
+
+    let pid_config = PidConfig {
+        setpoint: pid_flags.setpoint.unwrap_or(0.0),
+        kp: pid_flags.kp.unwrap_or(defaults.kp),
+        ki: pid_flags.ki.unwrap_or(defaults.ki),
+        kd: pid_flags.kd.unwrap_or(defaults.kd),
+        out_min: pid_flags.out_min.unwrap_or(defaults.out_min),
+        out_max: pid_flags.out_max.unwrap_or(defaults.out_max),
+        deadband: pid_flags.deadband.unwrap_or(defaults.deadband),
+        setpoint_ramp: pid_flags.setpoint_ramp.or(defaults.setpoint_ramp),
+        slew_rate: pid_flags.slew_rate.or(defaults.slew_rate),
+        pv_filter_alpha: pid_flags
+            .pv_filter_alpha
+            .unwrap_or(defaults.pv_filter_alpha),
+        anti_windup: pid_flags.anti_windup.unwrap_or(defaults.anti_windup),
+        anti_windup_tt: pid_flags.anti_windup_tt,
+        tt_upper_bound: None,
+    };
+
+    pid_config
+        .validate()
+        .map_err(|e| CliError::config(e.to_string()))?;
+
+    Ok(ReplayArgs {
+        log_path: raw.log.clone(),
+        pid_config,
+        setpoint_from_cli,
+        output_log: raw.output_log.clone(),
+        diff: raw.diff,
     })
 }

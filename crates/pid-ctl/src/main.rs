@@ -66,6 +66,10 @@ fn run(
             }
             cmd::run_loop(&mut parsed)
         }
+        SubCommand::Replay(raw) => {
+            let args = parse_replay(&raw)?;
+            cmd::run_replay(&args)
+        }
         SubCommand::Status(raw) => {
             let flags = parse_status_flags(&raw)?;
             cmd::run_status_dispatch(&flags)

@@ -12,12 +12,12 @@ pub(crate) use parse::parse_duration_flag;
 #[cfg(unix)]
 pub(crate) use parse::{get_socket_path, parse_set_args};
 pub(crate) use parse::{
-    get_state_path, parse_f64_value, parse_loop, parse_once, parse_pipe, parse_status_flags,
-    resolve_pv,
+    get_state_path, parse_f64_value, parse_loop, parse_once, parse_pipe, parse_replay,
+    parse_status_flags, resolve_pv,
 };
 pub(crate) use raw::{Cli, SubCommand};
 #[cfg(unix)]
 pub(crate) use raw::{SetRawArgs, SocketOnlyArgs};
 pub(crate) use types::{
-    LoopArgs, LoopRuntimeConfig, OnceArgs, OutputFormat, PipeArgs, StatusFlags,
+    LoopArgs, LoopRuntimeConfig, OnceArgs, OutputFormat, PipeArgs, ReplayArgs, StatusFlags,
 };
