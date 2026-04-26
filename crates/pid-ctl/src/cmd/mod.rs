@@ -1,3 +1,4 @@
+mod cmd_autotune;
 mod cmd_loop;
 mod cmd_once;
 mod cmd_pipe;
@@ -5,6 +6,7 @@ mod cmd_pipe;
 mod cmd_socket;
 mod cmd_state;
 
+pub(crate) use cmd_autotune::run_autotune;
 pub(crate) use cmd_loop::run_loop;
 pub(crate) use cmd_once::run_once;
 pub(crate) use cmd_pipe::run_pipe;

@@ -52,6 +52,10 @@ fn run(
             let parsed = parse_pipe(&raw)?;
             cmd::run_pipe(&parsed)
         }
+        SubCommand::Autotune(raw) => {
+            let parsed = parse_autotune(&raw)?;
+            cmd::run_autotune(&parsed)
+        }
         SubCommand::Loop(raw) => {
             let mut parsed = parse_loop(&raw)?;
             #[cfg(feature = "tui")]

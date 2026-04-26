@@ -10,6 +10,8 @@
 
 #[path = "req/helpers.rs"]
 mod helpers;
+#[path = "req/req_autotune.rs"]
+mod req_autotune;
 #[path = "req/req_cv_sink.rs"]
 mod req_cv_sink;
 #[path = "req/req_cv_write_policy.rs"]

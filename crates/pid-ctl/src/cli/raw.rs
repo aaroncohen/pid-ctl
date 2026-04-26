@@ -2,6 +2,7 @@ use super::parse::parse_duration_flag;
 use super::types::{CvSinkConfig, LoopPvSource, OncePvSource, PidFlags};
 use crate::CliError;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use pid_ctl::autotune::TuningRule;
 use pid_ctl_core::AntiWindupStrategy;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,6 +30,30 @@ fn parse_octal_mode(s: &str) -> Result<u32, String> {
 pub(super) enum OutputFormatArg {
     Text,
     Json,
+}
+
+// ---------------------------------------------------------------------------
+// Tuning rule value enum for clap (autotune subcommand)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, ValueEnum)]
+pub(super) enum TuningRuleArg {
+    /// Ziegler–Nichols PI
+    Pi,
+    /// Ziegler–Nichols PID
+    Pid,
+    /// Tyreus–Luyben
+    Tl,
+}
+
+impl From<TuningRuleArg> for TuningRule {
+    fn from(a: TuningRuleArg) -> Self {
+        match a {
+            TuningRuleArg::Pi => Self::Pi,
+            TuningRuleArg::Pid => Self::Pid,
+            TuningRuleArg::Tl => Self::Tl,
+        }
+    }
 }
 
 impl From<OutputFormatArg> for super::types::OutputFormat {
@@ -63,6 +88,8 @@ pub(crate) enum SubCommand {
     Loop(LoopRawArgs),
     /// Read PV lines from stdin and emit CV to stdout
     Pipe(PipeRawArgs),
+    /// Åström–Hägglund relay autotune: identify Ku/Tu and suggest PID gains
+    Autotune(AutotuneRawArgs),
     /// Show controller status
     Status(StatusRawArgs),
     /// Send a set command via socket
@@ -689,4 +716,56 @@ pub(crate) struct StateOnlyArgs {
     /// Path to state file
     #[arg(long)]
     pub(crate) state: Option<PathBuf>,
+}
+
+/// `autotune` — Åström–Hägglund relay feedback autotune.
+#[derive(Args, Clone, Debug)]
+pub(crate) struct AutotuneRawArgs {
+    /// Shell command to read PV (run via `sh -c`)
+    #[arg(long, required = true)]
+    pub(super) pv_cmd: String,
+
+    /// Shell command to write CV (use `{cv}` placeholder; run via `sh -c`)
+    #[arg(long, required = true)]
+    pub(super) cv_cmd: String,
+
+    /// CV operating point; relay toggles between bias±amp
+    #[arg(long, required = true)]
+    pub(super) bias: f64,
+
+    /// Relay half-amplitude (must be > 0)
+    #[arg(long, required = true)]
+    pub(super) amp: f64,
+
+    /// Test duration (e.g. 5m, 300s, 2.5m)
+    #[arg(long, required = true, value_parser = parse_duration_value)]
+    pub(super) duration: Duration,
+
+    /// Tuning rule to apply to identified (Ku, Tu)
+    #[arg(long, value_enum, default_value = "pid")]
+    pub(super) rule: TuningRuleArg,
+
+    /// Output minimum clamp
+    #[arg(long, default_value = "0")]
+    pub(super) out_min: f64,
+
+    /// Output maximum clamp
+    #[arg(long, default_value = "100")]
+    pub(super) out_max: f64,
+
+    /// Tick interval (e.g. 500ms, 1s)
+    #[arg(long, value_parser = parse_duration_value, default_value = "1s")]
+    pub(super) interval: Duration,
+
+    /// Command timeout in seconds (PV and CV commands)
+    #[arg(long)]
+    pub(super) cmd_timeout: Option<f64>,
+
+    /// CV output decimal precision
+    #[arg(long, default_value = "2")]
+    pub(super) cv_precision: u32,
+
+    /// Write suggested gains to this state file
+    #[arg(long)]
+    pub(super) state: Option<PathBuf>,
 }
