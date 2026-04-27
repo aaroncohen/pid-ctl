@@ -90,6 +90,8 @@ pub(crate) enum SubCommand {
     Pipe(PipeRawArgs),
     /// Åström–Hägglund relay autotune: identify Ku/Tu and suggest PID gains
     Autotune(AutotuneRawArgs),
+    /// Replay a NDJSON log with counterfactual PID gains
+    Replay(ReplayRawArgs),
     /// Show controller status
     Status(StatusRawArgs),
     /// Send a set command via socket
@@ -746,6 +748,42 @@ pub(crate) struct StateOnlyArgs {
     /// Path to state file
     #[arg(long)]
     pub(crate) state: Option<PathBuf>,
+}
+
+/// `replay` — replay a NDJSON log with counterfactual PID gains.
+#[derive(Args, Clone, Debug)]
+pub(crate) struct ReplayRawArgs {
+    /// Input NDJSON log file (produced by `loop --log`)
+    #[arg(long, required = true)]
+    pub(super) log: PathBuf,
+
+    /// Proportional gain for replay
+    #[arg(long, required = true)]
+    pub(super) kp: f64,
+
+    /// Integral gain for replay
+    #[arg(long, required = true)]
+    pub(super) ki: f64,
+
+    /// Derivative gain for replay
+    #[arg(long, required = true)]
+    pub(super) kd: f64,
+
+    /// Output minimum clamp (default: unclamped)
+    #[arg(long)]
+    pub(super) out_min: Option<f64>,
+
+    /// Output maximum clamp (default: unclamped)
+    #[arg(long)]
+    pub(super) out_max: Option<f64>,
+
+    /// Write replayed NDJSON to this file (default: stdout)
+    #[arg(long)]
+    pub(super) output_log: Option<PathBuf>,
+
+    /// Print CV delta summary only (max diff, RMS diff); do not write the full replayed log
+    #[arg(long)]
+    pub(super) diff: bool,
 }
 
 /// `autotune` — Åström–Hägglund relay feedback autotune.

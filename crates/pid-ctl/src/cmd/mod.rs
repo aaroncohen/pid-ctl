@@ -2,6 +2,7 @@ mod cmd_autotune;
 mod cmd_loop;
 mod cmd_once;
 mod cmd_pipe;
+mod cmd_replay;
 #[cfg(unix)]
 mod cmd_socket;
 mod cmd_state;
@@ -10,6 +11,7 @@ pub(crate) use cmd_autotune::run_autotune;
 pub(crate) use cmd_loop::run_loop;
 pub(crate) use cmd_once::run_once;
 pub(crate) use cmd_pipe::run_pipe;
+pub(crate) use cmd_replay::run_replay;
 #[cfg(unix)]
 pub(crate) use cmd_socket::{
     run_socket_hold, run_socket_reset, run_socket_resume, run_socket_save, run_socket_set,
