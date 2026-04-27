@@ -26,6 +26,8 @@ mod req_deadband;
 mod req_dt;
 #[path = "req/req_error_convention.rs"]
 mod req_error_convention;
+#[path = "req/req_feedforward.rs"]
+mod req_feedforward;
 #[path = "req/req_filter.rs"]
 mod req_filter;
 #[path = "req/req_gains_runtime.rs"]

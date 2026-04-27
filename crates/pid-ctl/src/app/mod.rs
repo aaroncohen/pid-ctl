@@ -194,6 +194,7 @@ impl ControllerSession {
         &mut self,
         pv: f64,
         dt: f64,
+        ff: f64,
         cv_sink: &mut dyn CvSink,
     ) -> Result<TickOutcome, TickError> {
         let prev_applied_cv = self.snapshot.last_cv.unwrap_or(0.0);
@@ -201,6 +202,7 @@ impl ControllerSession {
             pv,
             dt,
             prev_applied_cv,
+            ff,
         });
 
         if let Err(source) = cv_sink.write_cv(step.cv) {
@@ -367,6 +369,9 @@ pub struct IterationRecord {
     pub p: f64,
     pub i: f64,
     pub d: f64,
+    /// Feed-forward term. Omitted from JSON when zero to preserve backward compatibility.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ff: f64,
     pub cv: f64,
     pub i_acc: f64,
     pub dt: f64,
@@ -394,11 +399,17 @@ impl IterationRecord {
             p: step.p_term,
             i: step.i_term,
             d: step.d_term,
+            ff: step.ff_term,
             cv: step.cv,
             i_acc: step.i_acc,
             dt,
         }
     }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// Session creation failures.
@@ -533,8 +544,8 @@ mod tests {
         let mut session = ControllerSession::new(session_cfg).expect("session");
         let mut sink = OkSink;
 
-        session.process_pv(1.0, 1.0, &mut sink).expect("tick1");
-        let r2 = session.process_pv(2.0, 1.0, &mut sink).expect("tick2");
+        session.process_pv(1.0, 1.0, 0.0, &mut sink).expect("tick1");
+        let r2 = session.process_pv(2.0, 1.0, 0.0, &mut sink).expect("tick2");
         assert!(
             (r2.record.d - (-2.0)).abs() < 1e-9,
             "expected D=-kd*delta_pv, got {}",
@@ -542,7 +553,7 @@ mod tests {
         );
 
         session.on_dt_skipped();
-        let r3 = session.process_pv(3.0, 1.0, &mut sink).expect("tick3");
+        let r3 = session.process_pv(3.0, 1.0, 0.0, &mut sink).expect("tick3");
         assert!(
             r3.record.d.abs() < f64::EPSILON,
             "D should be zero after dt skip"
@@ -568,10 +579,14 @@ mod tests {
         let mut sink = OkSink;
 
         // First tick seeds last_pv.
-        let _ = session.process_pv(45.0, 1.0, &mut sink).expect("tick1");
+        let _ = session
+            .process_pv(45.0, 1.0, 0.0, &mut sink)
+            .expect("tick1");
 
         session.on_dt_skipped();
-        let outcome = session.process_pv(46.0, 1.0, &mut sink).expect("tick2");
+        let outcome = session
+            .process_pv(46.0, 1.0, 0.0, &mut sink)
+            .expect("tick2");
         assert_eq!(outcome.d_term_skipped, Some(DTermSkipReason::PostDtSkip));
     }
 
@@ -591,8 +606,12 @@ mod tests {
         let mut session = ControllerSession::new(session_cfg).expect("session");
         let mut sink = OkSink;
 
-        let _ = session.process_pv(45.0, 1.0, &mut sink).expect("tick1");
-        let outcome = session.process_pv(46.0, 1.0, &mut sink).expect("tick2");
+        let _ = session
+            .process_pv(45.0, 1.0, 0.0, &mut sink)
+            .expect("tick1");
+        let outcome = session
+            .process_pv(46.0, 1.0, 0.0, &mut sink)
+            .expect("tick2");
         assert_eq!(outcome.d_term_skipped, None);
     }
 }

@@ -1,6 +1,8 @@
 use crate::{CliError, LoopArgs, LoopRuntimeConfig, OutputFormat, print_iteration_json};
 use pid_ctl::adapters::{CvSink, PvSource};
-use pid_ctl::app::adapters_build::{build_cv_mode_sink, build_loop_pv_source};
+use pid_ctl::app::adapters_build::{
+    build_cv_mode_sink, build_loop_ff_source, build_loop_pv_source,
+};
 use pid_ctl::app::logger::Logger;
 use pid_ctl::app::loop_runtime::{
     LoopControls, MeasuredDt, apply_measured_dt, flush_state_at_shutdown,
@@ -27,6 +29,7 @@ pub(crate) fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         args.pv_cmd_timeout,
         args.runtime.pv_stdin_timeout(),
     );
+    let mut ff_source = build_loop_ff_source(&args.ff_source, args.cmd_timeout);
     let mut cv_sink: Box<dyn CvSink> =
         build_cv_mode_sink(&args.cv_mode(), args.cv_precision, args.cmd_timeout);
 
@@ -100,6 +103,11 @@ pub(crate) fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
             continue;
         };
 
+        let ff = ff_source
+            .as_mut()
+            .and_then(|src| src.read_pv().ok())
+            .unwrap_or(0.0);
+
         let mut observer = LoopObserver {
             output_format: args.output_format,
             verbose: args.verbose,
@@ -108,6 +116,7 @@ pub(crate) fn run_loop(args: &mut LoopArgs) -> Result<(), CliError> {
         let ctx = TickContext {
             scaled_pv: raw_pv * args.scale,
             dt,
+            ff,
             session: &mut session,
             cv_sink: cv_sink.as_mut(),
             logger: &mut logger,

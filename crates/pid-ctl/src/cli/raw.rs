@@ -166,6 +166,10 @@ pub(super) struct PidRawArgs {
     /// Back-calculation tracking time constant (seconds)
     #[arg(long)]
     pub(super) anti_windup_tt: Option<f64>,
+
+    /// Feed-forward gain (scales the raw FF value; 0.0 = no FF)
+    #[arg(long)]
+    pub(super) ff_gain: Option<f64>,
 }
 
 impl PidRawArgs {
@@ -195,8 +199,28 @@ impl PidRawArgs {
             pv_filter_alpha: self.pv_filter,
             anti_windup,
             anti_windup_tt: self.anti_windup_tt,
+            feedforward_gain: self.ff_gain,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Feed-forward source args (shared by once and loop)
+// ---------------------------------------------------------------------------
+
+#[derive(Args, Clone, Debug)]
+pub(super) struct FfRawArgs {
+    /// Literal feed-forward value (once only)
+    #[arg(long = "ff-value")]
+    pub(super) value: Option<f64>,
+
+    /// Read FF from this file each tick
+    #[arg(long = "ff-from-file")]
+    pub(super) from_file: Option<PathBuf>,
+
+    /// Run this command to read FF each tick
+    #[arg(long = "ff-cmd")]
+    pub(super) cmd: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +604,9 @@ pub(crate) struct OnceRawArgs {
     pub(super) pv: OncePvRawArgs,
 
     #[command(flatten)]
+    pub(super) ff: FfRawArgs,
+
+    #[command(flatten)]
     pub(super) cv: CvSinkRawArgs,
 
     /// Suppress CV output (dry run)
@@ -601,6 +628,9 @@ pub(crate) struct LoopRawArgs {
 
     #[command(flatten)]
     pub(super) pv: LoopPvRawArgs,
+
+    #[command(flatten)]
+    pub(super) ff: FfRawArgs,
 
     #[command(flatten)]
     pub(super) cv: CvSinkRawArgs,

@@ -17,6 +17,8 @@ use std::path::Path;
 pub struct TickContext<'a> {
     pub scaled_pv: f64,
     pub dt: f64,
+    /// Raw feed-forward value for this tick (scaled by `PidConfig::feedforward_gain` in core).
+    pub ff: f64,
     pub session: &'a mut ControllerSession,
     pub cv_sink: &'a mut dyn CvSink,
     pub logger: &'a mut Logger,
@@ -64,6 +66,7 @@ pub fn step(
     let TickContext {
         scaled_pv,
         dt,
+        ff,
         session,
         cv_sink,
         logger,
@@ -73,7 +76,7 @@ pub fn step(
         quiet,
     } = ctx;
 
-    match session.process_pv(scaled_pv, dt, cv_sink) {
+    match session.process_pv(scaled_pv, dt, ff, cv_sink) {
         Ok(outcome) => {
             *cv_fail_count = 0;
 
@@ -170,6 +173,7 @@ mod tests {
         let ctx = TickContext {
             scaled_pv: 5.0,
             dt: 1.0,
+            ff: 0.0,
             session: &mut session,
             cv_sink: &mut sink,
             logger: &mut logger,
@@ -196,6 +200,7 @@ mod tests {
         let ctx = TickContext {
             scaled_pv: 5.0,
             dt: 1.0,
+            ff: 0.0,
             session: &mut session,
             cv_sink: &mut sink,
             logger: &mut logger,
@@ -224,6 +229,7 @@ mod tests {
         let ctx = TickContext {
             scaled_pv: 5.0,
             dt: 1.0,
+            ff: 0.0,
             session: &mut session,
             cv_sink: &mut sink,
             logger: &mut logger,
@@ -256,13 +262,14 @@ mod tests {
         let mut fail_count = 0u32;
 
         // First tick seeds last_pv.
-        session.process_pv(5.0, 1.0, &mut sink).unwrap();
+        session.process_pv(5.0, 1.0, 0.0, &mut sink).unwrap();
         // Mark dt skipped so next tick has D-term skip.
         session.on_dt_skipped();
 
         let ctx = TickContext {
             scaled_pv: 5.0,
             dt: 1.0,
+            ff: 0.0,
             session: &mut session,
             cv_sink: &mut sink,
             logger: &mut logger,
@@ -288,6 +295,7 @@ mod tests {
         let ctx = TickContext {
             scaled_pv: 5.0,
             dt: 1.0,
+            ff: 0.0,
             session: &mut session,
             cv_sink: &mut fail_sink,
             logger: &mut logger,
@@ -304,6 +312,7 @@ mod tests {
         let ctx2 = TickContext {
             scaled_pv: 5.0,
             dt: 1.0,
+            ff: 0.0,
             session: &mut session,
             cv_sink: &mut ok_sink,
             logger: &mut logger,
