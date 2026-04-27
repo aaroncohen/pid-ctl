@@ -589,6 +589,27 @@ fn parse_loop_ff_source(ff: &FfRawArgs) -> Result<LoopFfSource, CliError> {
     }
 }
 
+pub(crate) fn parse_replay(
+    raw: &super::raw::ReplayRawArgs,
+) -> Result<super::types::ReplayArgs, CliError> {
+    if raw.diff && raw.output_log.is_some() {
+        return Err(CliError::config(
+            "--diff and --output-log are mutually exclusive: --diff suppresses the full log",
+        ));
+    }
+
+    Ok(super::types::ReplayArgs {
+        log: raw.log.clone(),
+        kp: raw.kp,
+        ki: raw.ki,
+        kd: raw.kd,
+        out_min: raw.out_min.unwrap_or(f64::NEG_INFINITY),
+        out_max: raw.out_max.unwrap_or(f64::INFINITY),
+        output_log: raw.output_log.clone(),
+        diff: raw.diff,
+    })
+}
+
 pub(crate) fn parse_f64_value(flag: &str, value: &str) -> Result<f64, CliError> {
     value.parse::<f64>().map_err(|error| {
         CliError::config(format!("{flag} expects a float, got `{value}`: {error}"))

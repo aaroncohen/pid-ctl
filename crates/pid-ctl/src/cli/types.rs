@@ -224,6 +224,19 @@ pub(crate) struct StatusFlags {
     pub(crate) socket_path: Option<PathBuf>,
 }
 
+/// Parsed and validated arguments for the `replay` subcommand.
+#[derive(Clone, Debug)]
+pub(crate) struct ReplayArgs {
+    pub(crate) log: PathBuf,
+    pub(crate) kp: f64,
+    pub(crate) ki: f64,
+    pub(crate) kd: f64,
+    pub(crate) out_min: f64,
+    pub(crate) out_max: f64,
+    pub(crate) output_log: Option<PathBuf>,
+    pub(crate) diff: bool,
+}
+
 /// Parsed and validated arguments for the `autotune` subcommand.
 #[derive(Clone, Debug)]
 pub(crate) struct AutotuneArgs {
