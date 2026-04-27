@@ -1,7 +1,9 @@
-use super::raw::{AutotuneRawArgs, LoopRawArgs, OnceRawArgs, PipeRawArgs, StatusRawArgs};
+use super::raw::{
+    AutotuneRawArgs, FfRawArgs, LoopRawArgs, OnceRawArgs, PipeRawArgs, StatusRawArgs,
+};
 use super::types::{
-    AutotuneArgs, CvMode, CvSinkConfig, LoopArgs, LoopPvSource, LoopRuntimeConfig, OnceArgs,
-    OncePvSource, OutputFormat, PidFlags, PipeArgs, SetArgs, StatusFlags,
+    AutotuneArgs, CvMode, CvSinkConfig, LoopArgs, LoopFfSource, LoopPvSource, LoopRuntimeConfig,
+    OnceArgs, OnceFfSource, OncePvSource, OutputFormat, PidFlags, PipeArgs, SetArgs, StatusFlags,
 };
 use super::user_set::UserSet;
 use crate::CliError;
@@ -104,8 +106,11 @@ pub(crate) fn parse_once(raw: &OnceRawArgs) -> Result<OnceArgs, CliError> {
         (1.0, false)
     };
 
+    let ff_source = parse_once_ff_source(&raw.ff)?;
+
     Ok(OnceArgs {
         pv_source,
+        ff_source,
         cmd_timeout: effective_cmd_timeout,
         pv_cmd_timeout,
         dt,
@@ -306,6 +311,8 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
         .max_dt
         .map_or_else(|| UserSet::Default(max_dt_default), UserSet::Explicit);
 
+    let ff_source = parse_loop_ff_source(&raw.ff)?;
+
     Ok(LoopArgs {
         runtime: LoopRuntimeConfig {
             interval,
@@ -314,6 +321,7 @@ pub(crate) fn parse_loop(raw: &LoopRawArgs) -> Result<LoopArgs, CliError> {
             state_write_interval,
         },
         pv_source,
+        ff_source,
         cv_sink,
         pid_config,
         state_path: raw.common.state.clone(),
@@ -469,6 +477,7 @@ pub(crate) fn resolve_pid_config(
             .unwrap_or(AntiWindupStrategy::BackCalculation),
         anti_windup_tt: flags.anti_windup_tt,
         tt_upper_bound: None,
+        feedforward_gain: flags.feedforward_gain.unwrap_or(0.0),
     })
 }
 
@@ -537,6 +546,47 @@ pub(crate) fn parse_autotune(raw: &AutotuneRawArgs) -> Result<AutotuneArgs, CliE
         cv_precision: raw.cv_precision as usize,
         state: raw.state.clone(),
     })
+}
+
+fn parse_once_ff_source(ff: &FfRawArgs) -> Result<OnceFfSource, CliError> {
+    let count = u32::from(ff.value.is_some())
+        + u32::from(ff.from_file.is_some())
+        + u32::from(ff.cmd.is_some());
+    if count > 1 {
+        return Err(CliError::config(
+            "only one FF source may be specified (--ff-value, --ff-from-file, or --ff-cmd)",
+        ));
+    }
+    if let Some(v) = ff.value {
+        Ok(OnceFfSource::Literal(v))
+    } else if let Some(ref path) = ff.from_file {
+        Ok(OnceFfSource::File(path.clone()))
+    } else if let Some(ref cmd) = ff.cmd {
+        Ok(OnceFfSource::Cmd(cmd.clone()))
+    } else {
+        Ok(OnceFfSource::Zero)
+    }
+}
+
+fn parse_loop_ff_source(ff: &FfRawArgs) -> Result<LoopFfSource, CliError> {
+    if ff.value.is_some() {
+        return Err(CliError::config(
+            "--ff-value is only supported with once — use --ff-from-file or --ff-cmd for loop",
+        ));
+    }
+    let count = u32::from(ff.from_file.is_some()) + u32::from(ff.cmd.is_some());
+    if count > 1 {
+        return Err(CliError::config(
+            "only one FF source may be specified (--ff-from-file or --ff-cmd)",
+        ));
+    }
+    if let Some(ref path) = ff.from_file {
+        Ok(LoopFfSource::File(path.clone()))
+    } else if let Some(ref cmd) = ff.cmd {
+        Ok(LoopFfSource::Cmd(cmd.clone()))
+    } else {
+        Ok(LoopFfSource::Zero)
+    }
 }
 
 pub(crate) fn parse_f64_value(flag: &str, value: &str) -> Result<f64, CliError> {

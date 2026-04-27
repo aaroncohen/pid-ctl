@@ -1,7 +1,7 @@
 use crate::{CliError, OnceArgs, OutputFormat, print_iteration_json, resolve_pv};
 use pid_ctl::adapters::CvSink;
 use pid_ctl::app::ControllerSession;
-use pid_ctl::app::adapters_build::build_cv_mode_sink;
+use pid_ctl::app::adapters_build::{build_cv_mode_sink, resolve_once_ff};
 use pid_ctl::app::logger::Logger;
 use pid_ctl::json_events;
 
@@ -17,7 +17,8 @@ pub(crate) fn run_once(args: &OnceArgs) -> Result<(), CliError> {
     let raw_pv = resolve_pv(&args.pv_source, args.pv_cmd_timeout)
         .map_err(|error| CliError::new(1, format!("failed to read PV: {error}")))?;
     let scaled_pv = raw_pv * args.scale;
-    match session.process_pv(scaled_pv, dt, sink.as_mut()) {
+    let ff = resolve_once_ff(&args.ff_source, args.cmd_timeout);
+    match session.process_pv(scaled_pv, dt, ff, sink.as_mut()) {
         Ok(outcome) => {
             if let Some(reason) = outcome.d_term_skipped {
                 json_events::emit_d_term_skipped(&mut logger, reason, outcome.record.iter);

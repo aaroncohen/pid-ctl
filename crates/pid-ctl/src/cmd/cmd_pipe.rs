@@ -32,7 +32,7 @@ pub(crate) fn run_pipe(args: &PipeArgs) -> Result<(), CliError> {
 
         let pv = parse_f64_value("--stdin", trimmed)? * args.scale;
         let outcome = session
-            .process_pv(pv, dt, &mut sink)
+            .process_pv(pv, dt, 0.0, &mut sink)
             .map_err(|error| CliError::new(1, error.to_string()))?;
 
         if let Some(reason) = outcome.d_term_skipped {

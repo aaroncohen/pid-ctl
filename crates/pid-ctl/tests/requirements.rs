@@ -20,6 +20,8 @@ mod req_cv_write_policy;
 mod req_dry_run;
 #[path = "req/req_fail_after.rs"]
 mod req_fail_after;
+#[path = "req/req_feedforward.rs"]
+mod req_feedforward;
 #[path = "req/req_flag_precedence.rs"]
 mod req_flag_precedence;
 #[path = "req/req_flag_validation.rs"]

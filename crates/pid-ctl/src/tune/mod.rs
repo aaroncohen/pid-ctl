@@ -347,6 +347,7 @@ pub(crate) fn run(mut args: LoopArgs, full_argv: &[String]) -> Result<(), CliErr
                 let ctx = TickContext {
                     scaled_pv,
                     dt,
+                    ff: 0.0,
                     session: &mut session,
                     cv_sink: active,
                     logger: &mut logger,

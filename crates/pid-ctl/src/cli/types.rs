@@ -6,7 +6,9 @@ use pid_ctl_core::PidConfig;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub(crate) use pid_ctl::app::adapters_build::{CvMode, CvSinkConfig, LoopPvSource, OncePvSource};
+pub(crate) use pid_ctl::app::adapters_build::{
+    CvMode, CvSinkConfig, LoopFfSource, LoopPvSource, OnceFfSource, OncePvSource,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum OutputFormat {
@@ -30,11 +32,13 @@ pub(crate) struct PidFlags {
     pub(crate) pv_filter_alpha: Option<f64>,
     pub(crate) anti_windup: Option<pid_ctl_core::AntiWindupStrategy>,
     pub(crate) anti_windup_tt: Option<f64>,
+    pub(crate) feedforward_gain: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct OnceArgs {
     pub(crate) pv_source: OncePvSource,
+    pub(crate) ff_source: OnceFfSource,
     pub(crate) cmd_timeout: Duration,
     pub(crate) pv_cmd_timeout: Duration,
     pub(crate) dt: f64,
@@ -145,6 +149,7 @@ impl LoopControls for LoopRuntimeConfig {
 pub(crate) struct LoopArgs {
     pub(crate) runtime: LoopRuntimeConfig,
     pub(crate) pv_source: LoopPvSource,
+    pub(crate) ff_source: LoopFfSource,
     pub(crate) cv_sink: Option<CvSinkConfig>,
     pub(crate) pid_config: PidConfig,
     pub(crate) state_path: Option<PathBuf>,

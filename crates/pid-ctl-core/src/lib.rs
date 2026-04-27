@@ -38,6 +38,9 @@ pub struct PidConfig {
     pub anti_windup: AntiWindupStrategy,
     pub anti_windup_tt: Option<f64>,
     pub tt_upper_bound: Option<f64>,
+    /// Scales the raw feed-forward value supplied in [`StepInput::ff`].
+    /// Default `0.0` means no feed-forward contribution (backward compatible).
+    pub feedforward_gain: f64,
 }
 
 impl Default for PidConfig {
@@ -56,6 +59,7 @@ impl Default for PidConfig {
             anti_windup: AntiWindupStrategy::BackCalculation,
             anti_windup_tt: None,
             tt_upper_bound: None,
+            feedforward_gain: 0.0,
         }
     }
 }
@@ -115,6 +119,9 @@ pub struct StepInput {
     pub pv: f64,
     pub dt: f64,
     pub prev_applied_cv: f64,
+    /// Raw feed-forward value. Scaled by [`PidConfig::feedforward_gain`] before
+    /// being added to the PID output. Pass `0.0` when not using feed-forward.
+    pub ff: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -124,6 +131,8 @@ pub struct StepResult {
     pub p_term: f64,
     pub i_term: f64,
     pub d_term: f64,
+    /// Feed-forward contribution: `feedforward_gain * ff_raw`.
+    pub ff_term: f64,
     pub i_acc: f64,
     pub effective_sp: f64,
     pub saturated: bool,
@@ -215,6 +224,7 @@ impl PidController {
 
         let p_term = self.config.kp * effective_error;
         let (d_term, d_term_skipped) = self.d_term(filtered_pv, input.dt);
+        let ff_term = self.config.feedforward_gain * input.ff;
         let candidate_i_acc = if self.config.ki == 0.0 {
             self.i_acc
         } else {
@@ -225,10 +235,11 @@ impl PidController {
             candidate_i_acc,
             p_term,
             d_term,
+            ff_term,
             input.prev_applied_cv,
             input.dt,
         );
-        let u_unclamped = p_term + i_term + d_term;
+        let u_unclamped = p_term + i_term + d_term + ff_term;
         let saturated = u_unclamped < self.config.out_min || u_unclamped > self.config.out_max;
         let clamped_cv = u_unclamped.clamp(self.config.out_min, self.config.out_max);
         let cv = self.apply_slew_rate(clamped_cv, input.prev_applied_cv, input.dt);
@@ -246,6 +257,7 @@ impl PidController {
             p_term,
             i_term,
             d_term,
+            ff_term,
             i_acc,
             effective_sp,
             saturated,
@@ -317,6 +329,7 @@ impl PidController {
         candidate_i_acc: f64,
         p_term: f64,
         d_term: f64,
+        ff_term: f64,
         prev_applied_cv: f64,
         dt: f64,
     ) -> (f64, f64) {
@@ -325,14 +338,15 @@ impl PidController {
         }
 
         let candidate_i_term = self.config.ki * candidate_i_acc;
-        let candidate_u_unclamped = p_term + candidate_i_term + d_term;
+        // Include FF in the saturation check so anti-windup responds to post-FF clipping.
+        let candidate_u_unclamped = p_term + candidate_i_term + d_term + ff_term;
 
         match self.config.anti_windup {
             AntiWindupStrategy::None => (candidate_i_acc, candidate_i_term),
             AntiWindupStrategy::Clamp => {
-                let pd_sum = p_term + d_term;
-                let min_i_term = self.config.out_min - pd_sum;
-                let max_i_term = self.config.out_max - pd_sum;
+                let pd_ff_sum = p_term + d_term + ff_term;
+                let min_i_term = self.config.out_min - pd_ff_sum;
+                let max_i_term = self.config.out_max - pd_ff_sum;
                 let clamped_i_term = candidate_i_term.clamp(min_i_term, max_i_term);
 
                 (clamped_i_term / self.config.ki, clamped_i_term)

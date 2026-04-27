@@ -16,6 +16,50 @@ use crate::adapters::{
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Feed-forward source for the `once` subcommand.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OnceFfSource {
+    Zero,
+    Literal(f64),
+    File(PathBuf),
+    Cmd(String),
+}
+
+/// Feed-forward source for the `loop` subcommand.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LoopFfSource {
+    Zero,
+    File(PathBuf),
+    Cmd(String),
+}
+
+/// Reads one FF value for `once`, returning `0.0` on any error.
+#[must_use]
+pub fn resolve_once_ff(source: &OnceFfSource, cmd_timeout: Duration) -> f64 {
+    match source {
+        OnceFfSource::Zero => 0.0,
+        OnceFfSource::Literal(v) => *v,
+        OnceFfSource::File(path) => FilePvSource::new(path.clone()).read_pv().unwrap_or(0.0),
+        OnceFfSource::Cmd(cmd) => CmdPvSource::new(cmd.clone(), cmd_timeout)
+            .read_pv()
+            .unwrap_or(0.0),
+    }
+}
+
+/// Builds a reusable `Box<dyn PvSource>` for reading FF each loop tick.
+/// Returns `None` when no FF source is configured.
+#[must_use]
+pub fn build_loop_ff_source(
+    source: &LoopFfSource,
+    cmd_timeout: Duration,
+) -> Option<Box<dyn PvSource>> {
+    match source {
+        LoopFfSource::Zero => None,
+        LoopFfSource::File(path) => Some(Box::new(FilePvSource::new(path.clone()))),
+        LoopFfSource::Cmd(cmd) => Some(Box::new(CmdPvSource::new(cmd.clone(), cmd_timeout))),
+    }
+}
+
 /// PV source accepted by the `once` subcommand (no stdin — `once` reads PV once).
 #[derive(Clone, Debug, PartialEq)]
 pub enum OncePvSource {
